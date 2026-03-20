@@ -6,9 +6,8 @@ mod primitives;
 
 use std::{
 	collections::HashMap,
-	fmt::{Debug, Display},
+	fmt::{Debug, Display, Formatter},
 	io::BufRead,
-	str::FromStr,
 };
 
 use annotations::*;
@@ -17,6 +16,7 @@ use primitives::*;
 use winnow::{
 	Parser, Result, Stateful,
 	combinator::{alt, delimited, opt, preceded, separated, separated_pair},
+	error::FromExternalError,
 };
 
 use crate::{
@@ -49,15 +49,16 @@ enum ParsePhase {
 	Solve,
 }
 
-#[derive(Debug, PartialEq)]
 /// State used during parsing.
-struct ParseState<'s, Identifier> {
+struct ParseState<'s, I, F> {
 	/// Collection of parsed parameters to be replaced in constraint arguments.
-	aliases: &'s mut HashMap<String, Literal<Identifier>>,
+	aliases: &'s mut HashMap<String, Literal<I>>,
+	/// Function used to intern identifiers.
+	interner: &'s mut F,
 }
 
 /// Type used for the parser input and state.
-type Stream<'source, 'state, Identifier> = Stateful<&'source str, ParseState<'state, Identifier>>;
+type Stream<'source, 'state, I, F> = Stateful<&'source str, ParseState<'state, I, F>>;
 
 /// Parses a constraint argument.
 ///
@@ -65,10 +66,11 @@ type Stream<'source, 'state, Identifier> = Stateful<&'source str, ParseState<'st
 /// <expr> ::= <basic-expr>
 ///          | <array-literal>
 /// ```
-fn argument<Identifier>(input: &mut Stream<'_, '_, Identifier>) -> Result<Argument<Identifier>>
+fn argument<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<Argument<I>>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
 {
 	alt((
 		literal.map(Argument::Literal),
@@ -83,12 +85,11 @@ where
 }
 
 /// Parse an array declaration.
-fn array_item<Identifier>(
-	input: &mut Stream<'_, '_, Identifier>,
-) -> Result<(Identifier, Array<Identifier>, bool)>
+fn array_item<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<(I, Array<I>, bool)>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
 {
 	let _ = token("array").parse_next(input)?;
 	let _ = delimited(token("["), interval_set(int), token("]")).parse_next(input)?;
@@ -122,7 +123,7 @@ where
 ///                    | "float"
 ///                    | "set of int"
 /// ```
-fn basic_parameter_type<I>(input: &mut Stream<'_, '_, I>) -> Result<Type>
+fn basic_parameter_type<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<Type>
 where
 	I: Debug,
 {
@@ -148,7 +149,7 @@ where
 ///                    | "var" "set" "of" <int-literal> ".." <int-literal>
 ///                    | "var" "set" "of" "{" [ <int-literal> "," ... ] "}"
 /// ```
-fn basic_variable_type<I>(input: &mut Stream<'_, '_, I>) -> Result<Type>
+fn basic_variable_type<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<Type>
 where
 	I: Debug,
 {
@@ -166,10 +167,11 @@ where
 /// ```bnf
 /// <constraint-item> ::= "constraint" <identifier> "(" [ <expr> "," ... ] ")" <annotations> ";"
 /// ```
-fn constraint<Identifier>(input: &mut Stream<'_, '_, Identifier>) -> Result<Constraint<Identifier>>
+fn constraint<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<Constraint<I>>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
 {
 	(
 		token("constraint"),
@@ -192,12 +194,11 @@ where
 }
 
 /// Parse a declaration item.
-fn declaration<Identifier>(
-	input: &mut Stream<'_, '_, Identifier>,
-) -> Result<Option<Declaration<Identifier>>>
+fn declaration<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<Option<Declaration<I>>>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
 {
 	alt((
 		array_item.map(Declaration::Array).map(Some),
@@ -208,19 +209,18 @@ where
 }
 
 /// Parse a parameter declaration item.
-fn parameter_item<Identifier>(
-	input: &mut Stream<'_, '_, Identifier>,
-) -> Result<(String, Literal<Identifier>)>
+fn parameter_item<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<(String, Literal<I>)>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
 {
 	delimited(
 		(basic_parameter_type, token(":")),
 		separated_pair(
 			token(identifier_raw.map(str::to_owned)),
 			token("="),
-			token(literal::<Identifier>),
+			token(literal),
 		),
 		token(";"),
 	)
@@ -231,14 +231,33 @@ where
 ///
 /// This is used by [`crate::FlatZinc::from_fzn`], which is the public entry
 /// point for `.fzn` parsing.
-pub(crate) fn parse<Identifier, VarMap, ArrayMap>(
-	mut source: impl BufRead,
-) -> Result<FlatZinc<Identifier, VarMap, ArrayMap>, FznParseError>
+pub(crate) fn parse<I, VarMap, ArrayMap, E>(
+	source: impl BufRead,
+) -> Result<FlatZinc<I, VarMap, ArrayMap>, FznParseError>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
-	VarMap: FromIterator<(Identifier, Variable<Identifier>)>,
-	ArrayMap: FromIterator<(Identifier, Array<Identifier>)>,
+	I: Clone + for<'a> TryFrom<&'a str, Error = E>,
+	E: Display,
+	I: Debug,
+	VarMap: FromIterator<(I, Variable<I>)>,
+	ArrayMap: FromIterator<(I, Array<I>)>,
+{
+	parse_with_interner(source, |s: &str| I::try_from(s))
+}
+
+/// Parse the `.fzn` source to a [`FlatZinc`] instance.
+///
+/// This is used by [`crate::FlatZinc::from_fzn`], which is the public entry
+/// point for `.fzn` parsing.
+pub(crate) fn parse_with_interner<I, VM, AM, F, E>(
+	mut source: impl BufRead,
+	mut interner: F,
+) -> Result<FlatZinc<I, VM, AM>, FznParseError>
+where
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
+	VM: FromIterator<(I, Variable<I>)>,
+	AM: FromIterator<(I, Array<I>)>,
 {
 	let mut variables = Vec::new();
 	let mut arrays = Vec::new();
@@ -258,9 +277,7 @@ where
 
 		let mut stream = Stateful {
 			input: std::str::from_utf8(&buffer)?,
-			state: ParseState::<Identifier> {
-				aliases: &mut parameters,
-			},
+			state: ParseState::new(&mut parameters, &mut interner),
 		};
 
 		// Check whether the statement only contains whitespace and comments
@@ -322,7 +339,7 @@ where
 			.map_err(|error| FznParseError::SyntaxError(error.to_string()))?;
 		match declaration {
 			Some(Declaration::Parameter((name, literal))) => {
-				let _ = parameters.insert(name, literal);
+				stream.state.insert(name, literal);
 			}
 			Some(Declaration::Variable((name, variable, is_output))) => {
 				if is_output {
@@ -357,15 +374,16 @@ where
 /// ```bnf
 /// <predicate-item> ::= "predicate" <identifier> "(" [ <pred-param-type> : <identifier> "," ... ] ")" ";"
 /// ```
-fn predicate_item<Identifier>(input: &mut Stream<'_, '_, Identifier>) -> Result<()>
+fn predicate_item<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<()>
 where
-	Identifier: Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
 {
 	(
 		token("predicate"),
-		token(identifier::<Identifier>),
-		delimited_list("(", predicate_parameter::<Identifier>, ")"),
+		token(identifier),
+		delimited_list("(", predicate_parameter, ")"),
 		token(";"),
 	)
 		.map(|_| ())
@@ -379,15 +397,16 @@ where
 /// ```bnf
 /// <pred-param-type> ":" <identifier>
 /// ```
-fn predicate_parameter<Identifier>(input: &mut Stream<'_, '_, Identifier>) -> Result<()>
+fn predicate_parameter<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<()>
 where
-	Identifier: Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
 {
 	separated_pair(
 		token(predicate_parameter_type),
 		token(":"),
-		token(identifier::<Identifier>),
+		token(identifier),
 	)
 	.map(|_| ())
 	.parse_next(input)
@@ -408,11 +427,11 @@ where
 ///                           | "set" "of" <set-float-literal>
 ///                           | "set" "of" <set-int-literal>
 /// ```
-fn predicate_parameter_type<I>(input: &mut Stream<'_, '_, I>) -> Result<()>
+fn predicate_parameter_type<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
 where
 	I: Debug,
 {
-	fn basic_predicate_parameter_type<I>(input: &mut Stream<'_, '_, I>) -> Result<()>
+	fn basic_predicate_parameter_type<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
 	where
 		I: Debug,
 	{
@@ -522,12 +541,11 @@ fn read_statement(source: &mut impl BufRead, buffer: &mut Vec<u8>) -> Result<(),
 ///                | "solve" <annotations> "minimize" <basic-expr> ";"
 ///                | "solve" <annotations> "maximize" <basic-expr> ";"
 /// ```
-fn solve_objective<Identifier>(
-	input: &mut Stream<'_, '_, Identifier>,
-) -> Result<SolveObjective<Identifier>>
+fn solve_objective<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<SolveObjective<I>>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
 {
 	(
 		token("solve"),
@@ -552,15 +570,15 @@ where
 }
 
 /// Parse a variable declaration item.
-fn variable<Identifier>(
-	input: &mut Stream<'_, '_, Identifier>,
-) -> Result<Option<(Identifier, Variable<Identifier>, bool)>>
+fn variable<'a, 's, I, F, E>(
+	input: &mut Stream<'a, 's, I, F>,
+) -> Result<Option<(I, Variable<I>, bool)>>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Clone + Debug,
 {
-	let mut store = None;
-	let result = (
+	let (_, ty, _, name, (flags, ann), value, _) = (
 		token("var"),
 		token(basic_variable_type),
 		token(":"),
@@ -569,47 +587,79 @@ where
 		opt(preceded(token("="), token(literal))),
 		token(";"),
 	)
-		.try_map(|(_, ty, _, name, (flags, ann), value, _)| {
-			if let Some(value) = value {
-				debug_assert!(!flags.output, "output variable cannot have a value");
-				store = Some((name.to_owned(), value));
-				Ok::<_, FznParseError>(None)
-			} else {
-				let name =
-					name.parse::<Identifier>()
-						.map_err(|err| FznParseError::IdentifierError {
-							ident: name.to_owned(),
-							err: err.to_string(),
-						})?;
-				Ok(Some((
-					name,
-					Variable {
-						ty,
-						value,
-						ann,
-						defined: flags.defined,
-						introduced: flags.introduced,
-					},
-					flags.output,
-				)))
-			}
-		})
 		.parse_next(input)?;
-	if let Some((name, value)) = store {
-		let _ = input.state.aliases.insert(name, value);
-	}
+	let result = if let Some(value) = value {
+		debug_assert!(!flags.output, "output variable cannot have a value");
+		input.state.insert(name.to_owned(), value);
+		None
+	} else {
+		let name = input
+			.state
+			.intern(name)
+			.map_err(|err| winnow::error::ContextError::from_external_error(input, err))?;
+		Some((
+			name,
+			Variable {
+				ty,
+				value,
+				ann,
+				defined: flags.defined,
+				introduced: flags.introduced,
+			},
+			flags.output,
+		))
+	};
 	Ok(result)
+}
+
+impl<I, F, E> ParseState<'_, I, F>
+where
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+{
+	/// Inserts an alias for an identifier, replacing any existing value.
+	fn insert(&mut self, name: String, value: Literal<I>) {
+		let _ = self.aliases.insert(name, value);
+	}
+
+	/// Interns an identifier, returning an error if the interner fails.
+	fn intern(&mut self, string: &str) -> Result<I, FznParseError> {
+		(self.interner)(string).map_err(|e| FznParseError::IdentifierError {
+			ident: string.to_owned(),
+			err: e.to_string(),
+		})
+	}
+
+	/// Resolves an identifier to a [`Literal`], if it has been aliased.
+	fn resolve(&self, name: &str) -> Option<&Literal<I>> {
+		self.aliases.get(name)
+	}
+}
+
+impl<'s, I, F> ParseState<'s, I, F> {
+	pub(crate) fn new(aliases: &'s mut HashMap<String, Literal<I>>, interner: &'s mut F) -> Self {
+		Self { aliases, interner }
+	}
+}
+
+impl<I: Debug, F> Debug for ParseState<'_, I, F> {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("ParseState")
+			.field("aliases", &self.aliases)
+			.field("interner", &"...")
+			.finish()
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use std::{
 		collections::HashMap,
+		convert::Infallible,
 		fmt::Debug,
 		fs::File,
 		io::{BufReader, Cursor},
 		path::PathBuf,
-		str::FromStr,
 	};
 
 	use rangelist::RangeList;
@@ -676,25 +726,36 @@ mod tests {
 		);
 	}
 
-	pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s str)
+pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s str)
 	where
-		P: for<'a> Parser<Stream<'s, 'a, String>, O, E>,
+		P: for<'state> Parser<
+			Stream<'s, 'state, String, fn(&str) -> Result<String, Infallible>>,
+			O,
+			E,
+		>,
 		O: Debug + PartialEq,
-		E: for<'a> ParserError<Stream<'s, 'a, String>> + Debug + PartialEq,
-		for<'a> <E as ParserError<Stream<'s, 'a, String>>>::Inner:
-			ParserError<Stream<'s, 'a, String>> + PartialEq + Debug,
+		E: for<'state> ParserError<
+				Stream<'s, 'state, String, fn(&str) -> Result<String, Infallible>>,
+			> + Debug,
+		for<'state> <E as ParserError<
+			Stream<'s, 'state, String, fn(&str) -> Result<String, Infallible>>,
+		>>::Inner: ParserError<
+				Stream<'s, 'state, String, fn(&str) -> Result<String, Infallible>>,
+			> + Debug,
 	{
 		let mut aliases = HashMap::default();
+		let mut interner: fn(&str) -> Result<String, Infallible> = string_interner_helper;
 
 		let stream = Stateful {
 			input,
-			state: ParseState {
-				aliases: &mut aliases,
-			},
+			state: ParseState::new(&mut aliases, &mut interner),
 		};
 
 		let parsed = parser.parse(stream);
-		assert_eq!(Ok(expected), parsed);
+		match parsed {
+			Ok(actual) => assert_eq!(expected, actual),
+			Err(err) => panic!("parser returned unexpected error: {err:?}"),
+		}
 	}
 
 	#[test]
@@ -870,15 +931,13 @@ mod tests {
 		#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 		struct XIdentifier(String);
 
-		impl FromStr for XIdentifier {
-			type Err = &'static str;
+		impl<'a> TryFrom<&'a str> for XIdentifier {
+			type Error = &'static str;
 
-			fn from_str(s: &str) -> Result<Self, Self::Err> {
-				if s.starts_with('x') {
-					Ok(Self(s.to_owned()))
-				} else {
-					Err("identifier must start with x")
-				}
+			fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+				s.starts_with('x')
+					.then(|| Self(s.to_owned()))
+					.ok_or("identifier must start with x")
 			}
 		}
 
@@ -901,6 +960,22 @@ mod tests {
 	}
 
 	#[test]
+	fn parse_supports_custom_interner_functions() {
+		#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+		struct Interned(String);
+
+		let fzn = FlatZinc::<Interned>::from_fzn_with_interner(
+			Cursor::new("var int: x :: output_var;\nconstraint int_eq(x, x);\nsolve satisfy;"),
+			|s| Ok::<_, Infallible>(Interned(format!("id:{s}"))),
+		)
+		.expect("failed to parse model with custom interner");
+
+		assert!(fzn.variables.contains_key(&Interned("id:x".to_owned())));
+		assert_eq!(fzn.output, vec![Interned("id:x".to_owned())]);
+		assert_eq!(fzn.constraints[0].id, Interned("id:int_eq".to_owned()));
+	}
+
+	#[test]
 	fn parse_supports_custom_map_types() {
 		type HashMapFzn =
 			FlatZinc<String, HashMap<String, Variable<String>>, HashMap<String, Array<String>>>;
@@ -917,12 +992,12 @@ mod tests {
 	#[test]
 	fn predicate_items_are_parsed_but_ignored() {
 		check_parser(
-			predicate_item::<String>,
+			predicate_item,
 			(),
 			"predicate array_int_minimum(var int: m,array [int] of var int: x);",
 		);
 		check_parser(
-			predicate_item::<String>,
+			predicate_item,
 			(),
 			"predicate my_float_set_in(var float: x,set of float: y);",
 		);
@@ -1101,6 +1176,10 @@ mod tests {
 			("some_param".to_owned(), Literal::Float(35.3)),
 			"float: some_param = 35.3;",
 		);
+	}
+
+	fn string_interner_helper(s: &str) -> Result<String, Infallible> {
+		Ok(s.to_owned())
 	}
 
 	#[test]

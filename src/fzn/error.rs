@@ -43,8 +43,8 @@ impl Display for FznParseError {
 	}
 }
 
-impl<I> From<ParseError<Stream<'_, '_, I>, ContextError>> for FznParseError {
-	fn from(value: ParseError<Stream<'_, '_, I>, ContextError>) -> Self {
+impl<I, F> From<ParseError<Stream<'_, '_, I, F>, ContextError>> for FznParseError {
+	fn from(value: ParseError<Stream<'_, '_, I, F>, ContextError>) -> Self {
 		FznParseError::SyntaxError(value.to_string())
 	}
 }

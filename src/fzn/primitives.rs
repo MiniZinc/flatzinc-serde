@@ -1,9 +1,6 @@
 //! Parsers for tokens used throughout the FlatZinc grammar.
 
-use std::{
-	fmt::{Debug, Display},
-	str::FromStr,
-};
+use std::fmt::{Debug, Display};
 
 use rangelist::RangeList;
 use winnow::{
@@ -15,10 +12,10 @@ use winnow::{
 	token::{one_of, take_till, take_until, take_while},
 };
 
-use crate::{FznParseError, Literal, fzn::Stream};
+use crate::{Literal, fzn::Stream};
 
 /// Parse a `/* ... */` block comment.
-fn block_comment<I>(input: &mut Stream<'_, '_, I>) -> Result<()>
+fn block_comment<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
 where
 	I: Debug,
 {
@@ -33,17 +30,17 @@ where
 /// <bool-literal> ::= "false"
 ///                  | "true"
 /// ```
-pub(super) fn boolean<I: Debug>(input: &mut Stream<'_, '_, I>) -> Result<bool> {
+pub(super) fn boolean<I: Debug, F>(input: &mut Stream<'_, '_, I, F>) -> Result<bool> {
 	alt(("true".map(|_| true), "false".map(|_| false))).parse_next(input)
 }
 
 /// Parses a list of elements seperated by a comma, and delimited by
 /// `open_token` and `close_token`.
-pub(super) fn delimited_list<'source, 'state, T, I>(
+pub(super) fn delimited_list<'source, 'state, T, I, F: 'state>(
 	open_token: &'static str,
-	element_parser: impl Parser<Stream<'source, 'state, I>, T, ContextError>,
+	element_parser: impl Parser<Stream<'source, 'state, I, F>, T, ContextError>,
 	close_token: &'static str,
-) -> impl Parser<Stream<'source, 'state, I>, Vec<T>, ContextError>
+) -> impl Parser<Stream<'source, 'state, I, F>, Vec<T>, ContextError>
 where
 	I: Debug + 'state,
 {
@@ -61,8 +58,8 @@ where
 ///                   | [-]?[0-9]+.[0-9]+[Ee][-+]?[0-9]+
 ///                   | [-]?[0-9]+[Ee][-+]?[0-9]+
 /// ```
-pub(super) fn float<I: Debug>(input: &mut Stream<'_, '_, I>) -> Result<f64> {
-	trace("float", move |input: &mut Stream<'_, '_, I>| {
+pub(super) fn float<I: Debug, F>(input: &mut Stream<'_, '_, I, F>) -> Result<f64> {
+	trace("float", move |input: &mut Stream<'_, '_, I, F>| {
 		(
 			opt('-'),
 			digit1,
@@ -91,21 +88,17 @@ pub(super) fn float<I: Debug>(input: &mut Stream<'_, '_, I>) -> Result<f64> {
 /// ```bnf
 /// <var-par-identifier> ::= [A-Za-z_][A-Za-z0-9_]*
 /// ```
-pub(super) fn identifier<Identifier>(input: &mut Stream<'_, '_, Identifier>) -> Result<Identifier>
+pub(super) fn identifier<I, F, E>(input: &mut Stream<'_, '_, I, F>) -> Result<I>
 where
-	Identifier: Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
+	I: Debug,
 {
-	identifier_raw
-		.try_map(|ident: &str| {
-			ident
-				.parse::<Identifier>()
-				.map_err(|err| FznParseError::IdentifierError {
-					ident: ident.to_owned(),
-					err: err.to_string(),
-				})
-		})
-		.parse_next(input)
+	let ident = identifier_raw.parse_next(input)?;
+	input
+		.state
+		.intern(ident)
+		.map_err(|err| ContextError::from_external_error(input, err))
 }
 
 /// Parses an identifier.
@@ -113,7 +106,7 @@ where
 /// ```bnf
 /// <var-par-identifier> ::= [A-Za-z_][A-Za-z0-9_]*
 /// ```
-pub(super) fn identifier_raw<'a, I>(input: &mut Stream<'a, '_, I>) -> Result<&'a str>
+pub(super) fn identifier_raw<'a, I, F>(input: &mut Stream<'a, '_, I, F>) -> Result<&'a str>
 where
 	I: Debug,
 {
@@ -129,7 +122,7 @@ where
 }
 
 /// Parse insignificant whitespace and comments.
-fn ignored<I>(input: &mut Stream<'_, '_, I>) -> Result<()>
+fn ignored<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
 where
 	I: Debug,
 {
@@ -152,8 +145,8 @@ where
 ///                 | [-]?0x[0-9A-Fa-f]+
 ///                 | [-]?0o[0-7]+
 /// ```
-pub(super) fn int<I: Debug>(input: &mut Stream<'_, '_, I>) -> Result<i64> {
-	trace("int", move |input: &mut Stream<'_, '_, I>| {
+pub(super) fn int<I: Debug, F>(input: &mut Stream<'_, '_, I, F>) -> Result<i64> {
+	trace("int", move |input: &mut Stream<'_, '_, I, F>| {
 		let is_negative = opt('-').parse_next(input)?.is_some();
 
 		let unsigned_integer = alt((
@@ -173,14 +166,14 @@ pub(super) fn int<I: Debug>(input: &mut Stream<'_, '_, I>) -> Result<i64> {
 }
 
 /// Higher-order parser for `<token> .. <token>`.
-pub(super) fn interval_set<'source, 'state, T, I>(
-	elem_parser: impl Parser<Stream<'source, 'state, I>, T, ContextError> + Copy,
-) -> impl Parser<Stream<'source, 'state, I>, RangeList<T>, ContextError>
+pub(super) fn interval_set<'source, 'state, T, I, F: 'state>(
+	elem_parser: impl Parser<Stream<'source, 'state, I, F>, T, ContextError> + Copy,
+) -> impl Parser<Stream<'source, 'state, I, F>, RangeList<T>, ContextError>
 where
 	T: PartialOrd + Copy + 'static,
 	I: Debug + 'state,
 {
-	move |input: &mut Stream<'source, 'state, I>| {
+	move |input: &mut Stream<'source, 'state, I, F>| {
 		separated_pair(token(elem_parser), token(".."), token(elem_parser))
 			.map(|(start, end)| RangeList::from_iter([start..=end]))
 			.parse_next(input)
@@ -188,7 +181,7 @@ where
 }
 
 /// Parse a `%` line comment.
-fn line_comment<I>(input: &mut Stream<'_, '_, I>) -> Result<()>
+fn line_comment<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
 where
 	I: Debug,
 {
@@ -205,12 +198,11 @@ where
 ///                        | <float-literal>
 ///                        | <set-literal>
 /// ```
-pub(super) fn literal<'a, Identifier>(
-	input: &mut Stream<'a, '_, Identifier>,
-) -> Result<Literal<Identifier>>
+pub(super) fn literal<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<Literal<I>>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	I: Clone + Debug,
+	F: FnMut(&str) -> std::result::Result<I, E>,
+	E: Display,
 {
 	// This can be optimized if it turns out to be a bottleneck. At the moment, to
 	// parse a literal, it will first attempt to parse a float and, if that fails,
@@ -229,18 +221,15 @@ where
 
 	Ok(match parsed_literal {
 		Literal::Identifier(ident) => {
-			if let Some(literal) = input.state.aliases.get(ident).cloned() {
+			if let Some(literal) = input.state.resolve(ident).cloned() {
 				literal
 			} else {
-				Literal::Identifier(ident.parse::<Identifier>().map_err(|err| {
-					ContextError::from_external_error(
-						input,
-						FznParseError::IdentifierError {
-							ident: ident.to_owned(),
-							err: err.to_string(),
-						},
-					)
-				})?)
+				Literal::Identifier(
+					input
+						.state
+						.intern(ident)
+						.map_err(|err| ContextError::from_external_error(input, err))?,
+				)
 			}
 		}
 		Literal::Int(i) => Literal::Int(i),
@@ -265,14 +254,14 @@ where
 /// <set-term> ::= "{" [ <elem> "," ... ] "}"
 ///              | <elem> ".." <elem>
 /// ```
-pub(super) fn set<'source, 'state, T, I>(
-	elem_parser: impl Parser<Stream<'source, 'state, I>, T, ContextError> + Copy,
-) -> impl Parser<Stream<'source, 'state, I>, RangeList<T>, ContextError>
+pub(super) fn set<'source, 'state, T, I, F: 'state>(
+	elem_parser: impl Parser<Stream<'source, 'state, I, F>, T, ContextError> + Copy,
+) -> impl Parser<Stream<'source, 'state, I, F>, RangeList<T>, ContextError>
 where
 	I: Debug + 'state,
 	T: PartialOrd + Copy + 'static,
 {
-	move |input: &mut Stream<'source, 'state, I>| -> Result<RangeList<T>> {
+	move |input: &mut Stream<'source, 'state, I, F>| -> Result<RangeList<T>> {
 		let sparse_set = delimited(
 			token('{'),
 			separated(0.., token(elem_parser), token(',')),
@@ -292,9 +281,9 @@ where
 ///
 /// Wraps the given parser with optional preceding and succeeding whitespace or
 /// comments.
-pub(super) fn token<'source, 'state, T, I>(
-	parser: impl Parser<Stream<'source, 'state, I>, T, ContextError>,
-) -> impl Parser<Stream<'source, 'state, I>, T, ContextError>
+pub(super) fn token<'source, 'state, T, I, F: 'state>(
+	parser: impl Parser<Stream<'source, 'state, I, F>, T, ContextError>,
+) -> impl Parser<Stream<'source, 'state, I, F>, T, ContextError>
 where
 	I: Debug + 'state,
 {
@@ -377,16 +366,18 @@ mod tests {
 	fn identifiers_of_parameters_are_resolved() {
 		let mut aliases =
 			HashMap::from_iter([("some_param".to_owned(), Literal::<String>::Int(5))]);
+		let mut interner = |s: &str| Ok::<_, std::convert::Infallible>(s.to_owned());
 
 		let stream = Stateful {
 			input: "some_param",
-			state: ParseState {
-				aliases: &mut aliases,
-			},
+			state: ParseState::new(&mut aliases, &mut interner),
 		};
 
 		let parsed = literal.parse(stream);
-		assert_eq!(Ok(Literal::Int(5)), parsed);
+		match parsed {
+			Ok(actual) => assert_eq!(Literal::Int(5), actual),
+			Err(err) => panic!("expected parameter alias to resolve: {err:?}"),
+		}
 	}
 
 	#[test]

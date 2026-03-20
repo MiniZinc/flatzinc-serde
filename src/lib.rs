@@ -118,9 +118,9 @@ mod fzn;
 #[cfg(feature = "serde")]
 mod serde;
 
-use std::{collections::BTreeMap, fmt::Display};
 #[cfg(feature = "fzn")]
-use std::{fmt::Debug, str::FromStr};
+use std::fmt::Debug;
+use std::{collections::BTreeMap, fmt::Display};
 
 #[cfg(feature = "serde")]
 use ::serde::{Deserialize, Serialize};
@@ -536,14 +536,32 @@ impl<Identifier: Display> Display for Constraint<Identifier> {
 #[cfg(feature = "fzn")]
 impl<Identifier, VarMap, ArrayMap> FlatZinc<Identifier, VarMap, ArrayMap>
 where
-	Identifier: Clone + Debug + FromStr,
-	<Identifier as FromStr>::Err: Display,
+	Identifier: Clone,
 	VarMap: FromIterator<(Identifier, Variable<Identifier>)>,
 	ArrayMap: FromIterator<(Identifier, Array<Identifier>)>,
 {
 	/// Parse a `.fzn` source into a [`FlatZinc`] instance.
-	pub fn from_fzn(source: impl std::io::BufRead) -> Result<Self, FznParseError> {
+	pub fn from_fzn<E>(source: impl std::io::BufRead) -> Result<Self, FznParseError>
+	where
+		Identifier: Debug,
+		for<'a> Identifier: TryFrom<&'a str, Error = E>,
+		E: Display,
+	{
 		fzn::parse(source)
+	}
+
+	/// Parse a `.fzn` source into a [`FlatZinc`] instance using a custom
+	/// identifier interner.
+	pub fn from_fzn_with_interner<F, E>(
+		source: impl std::io::BufRead,
+		interner: F,
+	) -> Result<Self, FznParseError>
+	where
+		Identifier: Debug,
+		F: FnMut(&str) -> Result<Identifier, E>,
+		E: Display,
+	{
+		fzn::parse_with_interner(source, interner)
 	}
 }
 
