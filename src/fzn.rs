@@ -53,7 +53,7 @@ enum ParsePhase {
 /// State used during parsing.
 struct ParseState<'s, Identifier> {
 	/// Collection of parsed parameters to be replaced in constraint arguments.
-	parameters: &'s mut HashMap<String, Literal<Identifier>>,
+	aliases: &'s mut HashMap<String, Literal<Identifier>>,
 }
 
 /// Type used for the parser input and state.
@@ -194,15 +194,15 @@ where
 /// Parse a declaration item.
 fn declaration<Identifier>(
 	input: &mut Stream<'_, '_, Identifier>,
-) -> Result<Declaration<Identifier>>
+) -> Result<Option<Declaration<Identifier>>>
 where
 	Identifier: Clone + Debug + FromStr,
 	<Identifier as FromStr>::Err: Display,
 {
 	alt((
-		array_item.map(Declaration::Array),
-		variable.map(Declaration::Variable),
-		parameter_item.map(Declaration::Parameter),
+		array_item.map(Declaration::Array).map(Some),
+		variable.map(|opt| opt.map(Declaration::Variable)),
+		parameter_item.map(Declaration::Parameter).map(Some),
 	))
 	.parse_next(input)
 }
@@ -259,7 +259,7 @@ where
 		let mut stream = Stateful {
 			input: std::str::from_utf8(&buffer)?,
 			state: ParseState::<Identifier> {
-				parameters: &mut parameters,
+				aliases: &mut parameters,
 			},
 		};
 
@@ -321,20 +321,23 @@ where
 			.parse_next(&mut stream)
 			.map_err(|error| FznParseError::SyntaxError(error.to_string()))?;
 		match declaration {
-			Declaration::Parameter((name, literal)) => {
+			Some(Declaration::Parameter((name, literal))) => {
 				let _ = parameters.insert(name, literal);
 			}
-			Declaration::Variable((name, variable, is_output)) => {
+			Some(Declaration::Variable((name, variable, is_output))) => {
 				if is_output {
 					output.push(name.clone());
 				}
 				variables.push((name, variable));
 			}
-			Declaration::Array((name, array, is_output)) => {
+			Some(Declaration::Array((name, array, is_output))) => {
 				if is_output {
 					output.push(name.clone());
 				}
 				arrays.push((name, array));
+			}
+			None => {
+				// Added to the alias map
 			}
 		}
 	}
@@ -551,34 +554,51 @@ where
 /// Parse a variable declaration item.
 fn variable<Identifier>(
 	input: &mut Stream<'_, '_, Identifier>,
-) -> Result<(Identifier, Variable<Identifier>, bool)>
+) -> Result<Option<(Identifier, Variable<Identifier>, bool)>>
 where
 	Identifier: Clone + Debug + FromStr,
 	<Identifier as FromStr>::Err: Display,
 {
-	(
+	let mut store = None;
+	let result = (
 		token("var"),
 		token(basic_variable_type),
 		token(":"),
-		token(identifier),
+		token(identifier_raw),
 		variable_annotations,
 		opt(preceded(token("="), token(literal))),
 		token(";"),
 	)
-		.map(|(_, ty, _, name, (flags, ann), value, _)| {
-			(
-				name,
-				Variable {
-					ty,
-					value,
-					ann,
-					defined: flags.defined,
-					introduced: flags.introduced,
-				},
-				flags.output,
-			)
+		.try_map(|(_, ty, _, name, (flags, ann), value, _)| {
+			if let Some(value) = value {
+				debug_assert!(!flags.output, "output variable cannot have a value");
+				store = Some((name.to_owned(), value));
+				Ok::<_, FznParseError>(None)
+			} else {
+				let name =
+					name.parse::<Identifier>()
+						.map_err(|err| FznParseError::IdentifierError {
+							ident: name.to_owned(),
+							err: err.to_string(),
+						})?;
+				Ok(Some((
+					name,
+					Variable {
+						ty,
+						value,
+						ann,
+						defined: flags.defined,
+						introduced: flags.introduced,
+					},
+					flags.output,
+				)))
+			}
 		})
-		.parse_next(input)
+		.parse_next(input)?;
+	if let Some((name, value)) = store {
+		let _ = input.state.aliases.insert(name, value);
+	}
+	Ok(result)
 }
 
 #[cfg(test)]
@@ -664,12 +684,12 @@ mod tests {
 		for<'a> <E as ParserError<Stream<'s, 'a, String>>>::Inner:
 			ParserError<Stream<'s, 'a, String>> + PartialEq + Debug,
 	{
-		let mut parameters = HashMap::default();
+		let mut aliases = HashMap::default();
 
 		let stream = Stateful {
 			input,
 			state: ParseState {
-				parameters: &mut parameters,
+				aliases: &mut aliases,
 			},
 		};
 
@@ -769,7 +789,7 @@ mod tests {
 	fn output_variable_annotation_is_promoted() {
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
@@ -779,7 +799,7 @@ mod tests {
 					introduced: true,
 				},
 				true,
-			),
+			)),
 			"var int: x :: output_var :: var_is_introduced;",
 		);
 
@@ -1087,7 +1107,7 @@ mod tests {
 	fn variable_introduced_and_or_defined() {
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
@@ -1097,12 +1117,12 @@ mod tests {
 					introduced: true,
 				},
 				false,
-			),
+			)),
 			"var int: x :: var_is_introduced;",
 		);
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
@@ -1112,12 +1132,12 @@ mod tests {
 					introduced: false,
 				},
 				false,
-			),
+			)),
 			"var int: x :: is_defined_var;",
 		);
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Bool,
@@ -1127,7 +1147,7 @@ mod tests {
 					introduced: true,
 				},
 				false,
-			),
+			)),
 			"var bool: x :: is_defined_var :: var_is_introduced;",
 		);
 	}
@@ -1136,37 +1156,18 @@ mod tests {
 	fn variable_with_annotation() {
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
-					value: Some(Literal::Int(5)),
+					value: None,
 					ann: vec![Annotation::Atom("mip".to_owned())],
 					defined: false,
 					introduced: false,
 				},
 				false,
-			),
-			"var int: x :: mip = 5;",
-		);
-	}
-
-	#[test]
-	fn variable_with_assignment() {
-		check_parser(
-			variable,
-			(
-				"x".to_owned(),
-				Variable {
-					ty: Type::Int(None),
-					value: Some(Literal::Int(5)),
-					ann: vec![],
-					defined: false,
-					introduced: false,
-				},
-				false,
-			),
-			"var int: x = 5;",
+			)),
+			"var int: x :: mip;",
 		);
 	}
 
@@ -1174,7 +1175,7 @@ mod tests {
 	fn variable_with_bounded_float_domain() {
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Float(Some(RangeList::from(1.0..=5.5))),
@@ -1184,7 +1185,7 @@ mod tests {
 					introduced: false,
 				},
 				false,
-			),
+			)),
 			"var 1.0..5.5: x;",
 		);
 	}
@@ -1193,7 +1194,7 @@ mod tests {
 	fn variable_with_bounded_int_domain() {
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(Some(RangeList::from(1..=5))),
@@ -1203,12 +1204,12 @@ mod tests {
 					introduced: false,
 				},
 				false,
-			),
+			)),
 			"var 1..5: x;",
 		);
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(Some(RangeList::from_iter([1..=1, 4..=4, 6..=6]))),
@@ -1218,7 +1219,7 @@ mod tests {
 					introduced: false,
 				},
 				false,
-			),
+			)),
 			"var {1, 4, 6}: x;",
 		);
 	}
@@ -1227,7 +1228,7 @@ mod tests {
 	fn variable_with_int_set_domain() {
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::IntSet(Some(RangeList::from(1..=5))),
@@ -1237,12 +1238,12 @@ mod tests {
 					introduced: false,
 				},
 				false,
-			),
+			)),
 			"var set of 1..5: x;",
 		);
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::IntSet(Some(RangeList::from_iter([1..=1, 3..=3]))),
@@ -1252,7 +1253,7 @@ mod tests {
 					introduced: false,
 				},
 				false,
-			),
+			)),
 			"var set of {1, 3}: x;",
 		);
 	}
@@ -1261,7 +1262,7 @@ mod tests {
 	fn variable_with_named_domain() {
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
@@ -1271,12 +1272,12 @@ mod tests {
 					introduced: false,
 				},
 				false,
-			),
+			)),
 			"var int: x;",
 		);
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Float(None),
@@ -1286,12 +1287,12 @@ mod tests {
 					introduced: false,
 				},
 				false,
-			),
+			)),
 			"var float: x;",
 		);
 		check_parser(
 			variable,
-			(
+			Some((
 				"x".to_owned(),
 				Variable {
 					ty: Type::Bool,
@@ -1301,7 +1302,7 @@ mod tests {
 					introduced: false,
 				},
 				false,
-			),
+			)),
 			"var bool: x;",
 		);
 	}

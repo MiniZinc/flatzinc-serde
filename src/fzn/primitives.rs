@@ -229,7 +229,7 @@ where
 
 	Ok(match parsed_literal {
 		Literal::Identifier(ident) => {
-			if let Some(literal) = input.state.parameters.get(ident).cloned() {
+			if let Some(literal) = input.state.aliases.get(ident).cloned() {
 				literal
 			} else {
 				Literal::Identifier(ident.parse::<Identifier>().map_err(|err| {
@@ -375,13 +375,13 @@ mod tests {
 
 	#[test]
 	fn identifiers_of_parameters_are_resolved() {
-		let mut parameters =
+		let mut aliases =
 			HashMap::from_iter([("some_param".to_owned(), Literal::<String>::Int(5))]);
 
 		let stream = Stateful {
 			input: "some_param",
 			state: ParseState {
-				parameters: &mut parameters,
+				aliases: &mut aliases,
 			},
 		};
 
