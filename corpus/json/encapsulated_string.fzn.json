@@ -16,5 +16,6 @@
 			}
 		]
 	},
-	"verson": "1.0"
+	"version": "1.0",
+	"unknown_key": "let's ignore it!"
 }

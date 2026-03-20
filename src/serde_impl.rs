@@ -1,7 +1,13 @@
 //! Helper structures and functions to parse and output using `serde` certain
 //! types in the FlatZinc JSON serialization
 
-use std::{fmt, marker::PhantomData};
+pub(crate) mod seeded;
+
+use std::{
+	borrow::Cow,
+	fmt::{self, Debug, Display, Formatter},
+	marker::PhantomData,
+};
 
 use serde::{
 	Deserialize, Deserializer, Serialize, Serializer,
@@ -9,7 +15,9 @@ use serde::{
 	ser::SerializeMap,
 };
 
-use crate::{Annotation, Literal, Method, RangeList, SolveObjective, Type, Variable};
+use crate::{
+	Annotation, Array, FlatZinc, Literal, Method, RangeList, SolveObjective, Type, Variable,
+};
 
 /// Base variable type used for the `"type"` field in FlatZinc JSON.
 ///
@@ -108,6 +116,7 @@ where
 	where
 		A: MapAccess<'de>,
 	{
+		/// Create an iterator wrapper over a serde map access object.
 		fn new(map: &'a mut A) -> Self {
 			Self {
 				map,
@@ -146,7 +155,7 @@ where
 	{
 		type Value = M;
 
-		fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
 			formatter.write_str("a JSON object")
 		}
 
@@ -236,6 +245,21 @@ pub(crate) fn serialize_set<E: PartialOrd + Serialize + Copy, S: Serializer>(
 	Serialize::serialize(&x, serializer)
 }
 
+impl<'de, I, VM, AM, E> Deserialize<'de> for FlatZinc<I, VM, AM>
+where
+	I: Clone + Debug + TryFrom<Cow<'de, str>, Error = E>,
+	E: Display,
+	VM: FromIterator<(I, Variable<I>)>,
+	AM: FromIterator<(I, Array<I>)>,
+{
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: Deserializer<'de>,
+	{
+		Self::deserialize_with_interner(deserializer, I::try_from)
+	}
+}
+
 impl<'de, Identifier: Deserialize<'de>> Deserialize<'de> for SolveObjective<Identifier> {
 	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		#[derive(Deserialize)]
@@ -314,68 +338,13 @@ impl<Identifier: Serialize> Serialize for SolveObjective<Identifier> {
 
 impl<'de, Identifier: Deserialize<'de>> Deserialize<'de> for Variable<Identifier> {
 	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		#[derive(Deserialize)]
-		#[serde(rename = "variable")]
-		#[serde(bound(deserialize = "Identifier: Deserialize<'de>"))]
-		struct VariableRepr<Identifier> {
-			/// Base type stored in the JSON `"type"` field.
-			#[serde(rename = "type")]
-			ty: BaseType,
-			/// Optional domain stored in the JSON `"domain"` field.
-			#[serde(skip_serializing_if = "Option::is_none")]
-			domain: Option<VariableDomain>,
-			/// Optional right-hand side stored in the JSON `"rhs"` field.
-			#[serde(rename = "rhs", skip_serializing_if = "Option::is_none")]
-			value: Option<Literal<Identifier>>,
-			/// Variable annotations stored in the JSON `"ann"` field.
-			#[serde(default, skip_serializing_if = "Vec::is_empty")]
-			ann: Vec<Annotation<Identifier>>,
-			/// Whether the variable is solver-defined.
-			#[serde(default, skip_serializing_if = "is_false")]
-			defined: bool,
-			/// Whether the variable was introduced during MiniZinc lowering.
-			#[serde(default, skip_serializing_if = "is_false")]
-			introduced: bool,
+		let variable = seeded::VariableValue::deserialize(deserializer)?;
+		if variable.value.is_some() {
+			return Err(<D::Error as ::serde::de::Error>::custom(
+				"`Variable` does not accept an `rhs` field; deserialize `FlatZinc` instead to resolve aliases",
+			));
 		}
-
-		let repr = VariableRepr::deserialize(deserializer)?;
-		let ty = match (repr.ty, repr.domain) {
-			(BaseType::Bool, None) => Type::Bool,
-			(BaseType::Bool, Some(_)) => {
-				return Err(<D::Error as ::serde::de::Error>::custom(
-					"bool variables cannot have a domain",
-				));
-			}
-			(BaseType::Int, None) => Type::Int(None),
-			(BaseType::Int, Some(VariableDomain::Int(domain))) => Type::Int(Some(domain)),
-			(BaseType::Int, Some(VariableDomain::Float(_))) => {
-				return Err(<D::Error as ::serde::de::Error>::custom(
-					"int variables require an int domain",
-				));
-			}
-			(BaseType::Float, None) => Type::Float(None),
-			(BaseType::Float, Some(VariableDomain::Float(domain))) => Type::Float(Some(domain)),
-			(BaseType::Float, Some(VariableDomain::Int(_))) => {
-				return Err(<D::Error as ::serde::de::Error>::custom(
-					"float variables require a float domain",
-				));
-			}
-			(BaseType::IntSet, None) => Type::IntSet(None),
-			(BaseType::IntSet, Some(VariableDomain::Int(domain))) => Type::IntSet(Some(domain)),
-			(BaseType::IntSet, Some(VariableDomain::Float(_))) => {
-				return Err(<D::Error as ::serde::de::Error>::custom(
-					"set of int variables require an int domain",
-				));
-			}
-		};
-
-		Ok(Variable {
-			ty,
-			value: repr.value,
-			ann: repr.ann,
-			defined: repr.defined,
-			introduced: repr.introduced,
-		})
+		Ok(variable.into_variable())
 	}
 }
 
@@ -390,9 +359,6 @@ impl<Identifier: Serialize> Serialize for Variable<Identifier> {
 			/// Optional domain stored in the JSON `"domain"` field.
 			#[serde(skip_serializing_if = "Option::is_none")]
 			domain: Option<VariableDomain>,
-			/// Optional right-hand side stored in the JSON `"rhs"` field.
-			#[serde(rename = "rhs", skip_serializing_if = "Option::is_none")]
-			value: Option<&'a Literal<Identifier>>,
 			/// Variable annotations stored in the JSON `"ann"` field.
 			#[serde(default, skip_serializing_if = "Vec::is_empty")]
 			ann: &'a Vec<Annotation<Identifier>>,
@@ -414,7 +380,6 @@ impl<Identifier: Serialize> Serialize for Variable<Identifier> {
 		VariableRepr {
 			ty,
 			domain,
-			value: self.value.as_ref(),
 			ann: &self.ann,
 			defined: self.defined,
 			introduced: self.introduced,
@@ -442,6 +407,7 @@ mod tests {
 
 	use std::{
 		collections::{BTreeMap, HashMap},
+		convert::Infallible,
 		fs::File,
 		io::{BufReader, Read},
 		path::Path,
@@ -449,11 +415,12 @@ mod tests {
 
 	use expect_test::ExpectFile;
 	use rangelist::RangeList;
+	use serde_json::Deserializer;
 	use ustr::Ustr;
 
 	use crate::{
-		Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Array, FlatZinc,
-		Literal, Method, SolveObjective, Type, Variable,
+		Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Argument, Array,
+		FlatZinc, Literal, Method, SolveObjective, Type, Variable,
 	};
 
 	#[test]
@@ -468,6 +435,121 @@ mod tests {
 		assert!(fzn.constraints.is_empty());
 		assert!(fzn.output.is_empty());
 		assert_eq!(fzn.version, "1.0");
+	}
+
+	#[test]
+	fn test_deserialize_variable_rejects_rhs() {
+		let err = serde_json::from_str::<Variable<String>>(
+			r#"{
+			"type": "int",
+			"rhs": 5,
+			"ann": ["foo"],
+			"introduced": true
+		}"#,
+		)
+		.unwrap_err();
+
+		assert!(err.to_string().contains("does not accept an `rhs` field"));
+	}
+
+	#[test]
+	fn test_deserialize_with_custom_interner() {
+		#[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+		struct Interned(String);
+
+		let json = r#"{
+			"variables": {
+				"x": {"type": "int"}
+			},
+			"constraints": [
+				{"id": "int_eq", "args": ["x", 1]}
+			],
+			"solve": {"method": "satisfy"},
+			"output": ["x"],
+			"version": "1.0"
+		}"#;
+
+		let mut de = Deserializer::from_str(json);
+		let fzn = FlatZinc::<Interned>::deserialize_with_interner(&mut de, |s| {
+			Ok::<_, Infallible>(Interned(format!("intern:{s}")))
+		})
+		.unwrap();
+
+		assert_eq!(fzn.output, vec![Interned("intern:x".to_owned())]);
+		assert_eq!(fzn.constraints[0].id, Interned("intern:int_eq".to_owned()));
+		assert_eq!(
+			fzn.constraints[0].args[0],
+			Argument::Literal(Literal::Identifier(Interned("intern:x".to_owned())))
+		);
+	}
+
+	#[test]
+	fn test_deserialize_with_interner_resolves_aliases() {
+		let json = r#"{
+			"variables": {
+				"y": {"type": "int", "rhs": 5},
+				"x": {"type": "int"}
+			},
+			"constraints": [
+				{"id": "int_eq", "args": ["y", "x"]}
+			],
+			"solve": {"method": "satisfy"},
+			"version": "1.0"
+		}"#;
+
+		let fzn =
+			FlatZinc::<String>::deserialize_with_interner(&mut Deserializer::from_str(json), |s| {
+				Ok::<_, Infallible>(s.into())
+			})
+			.unwrap();
+
+		assert_eq!(fzn.variables.len(), 1);
+		assert!(!fzn.variables.contains_key("y"));
+		assert_eq!(
+			fzn.constraints[0].args,
+			vec![
+				Argument::Literal(Literal::Int(5)),
+				Argument::Literal(Literal::Identifier("x".to_owned())),
+			]
+		);
+	}
+
+	#[test]
+	fn test_deserialize_with_interner_resolves_aliases_when_variables_come_late() {
+		let json = r#"{
+			"constraints": [
+				{"id": "int_eq", "args": ["y", "x"]}
+			],
+			"arrays": {
+				"ys": {"a": ["y", 1]}
+			},
+			"output": ["y", "x"],
+			"solve": {"method": "satisfy"},
+			"variables": {
+				"y": {"type": "int", "rhs": 5},
+				"x": {"type": "int"}
+			},
+			"version": "1.0"
+		}"#;
+
+		let fzn =
+			FlatZinc::<String>::deserialize_with_interner(&mut Deserializer::from_str(json), |s| {
+				Ok::<_, Infallible>(s.into())
+			})
+			.unwrap();
+
+		assert_eq!(
+			fzn.arrays["ys"].contents,
+			vec![Literal::Int(5), Literal::Int(1)]
+		);
+		assert_eq!(
+			fzn.constraints[0].args,
+			vec![
+				Argument::Literal(Literal::Int(5)),
+				Argument::Literal(Literal::Identifier("x".to_owned())),
+			]
+		);
+		assert_eq!(fzn.output, vec!["y".to_owned(), "x".to_owned()]);
 	}
 
 	#[test]
@@ -501,19 +583,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_ident_no_copy() {
-		let mut rdr = BufReader::new(
-			File::open(Path::new("./corpus/json/documentation_example.fzn.json")).unwrap(),
-		);
-		let mut content = String::new();
-		let _ = rdr.read_to_string(&mut content).unwrap();
-
-		let fzn: FlatZinc<&str> = serde_json::from_str(&content).unwrap();
-		expect_test::expect_file!["../corpus/json/documentation_example.debug.txt"]
-			.assert_debug_eq(&fzn)
-	}
-
-	#[test]
 	fn test_print_flatzinc() {
 		let mut rdr = BufReader::new(
 			File::open(Path::new("./corpus/json/documentation_example.fzn.json")).unwrap(),
@@ -521,7 +590,7 @@ mod tests {
 		let mut content = String::new();
 		let _ = rdr.read_to_string(&mut content).unwrap();
 
-		let fzn: FlatZinc<&str> = serde_json::from_str(&content).unwrap();
+		let fzn: FlatZinc = serde_json::from_str(&content).unwrap();
 		expect_test::expect_file!["../corpus/fzn/documentation_example.fzn"]
 			.assert_eq(&fzn.to_string());
 
@@ -572,7 +641,6 @@ mod tests {
 					ann: vec![Annotation::Atom("special")],
 					defined: false,
 					introduced: true,
-					value: Some(Literal::IntSet(RangeList::from(1..=4))),
 				},
 			)]),
 			arrays: BTreeMap::from([(
@@ -589,7 +657,7 @@ mod tests {
 		};
 		assert_eq!(
 			fzn.to_string(),
-			"var set of int: x ::var_is_introduced ::special = 1..4;\narray[1..3] of int: y ::output_array([1..3]) ::is_defined_var ::var_is_introduced ::special = [1, 2, 3];\nsolve satisfy;\n"
+			"var set of int: x ::var_is_introduced ::special;\narray[1..3] of int: y ::output_array([1..3]) ::is_defined_var ::var_is_introduced ::special = [1, 2, 3];\nsolve satisfy;\n"
 		);
 
 		let sat = SolveObjective {

@@ -26,5 +26,5 @@
 	],
 	"output": ["b", "c"],
 	"solve": { "method": "maximize", "objective": "X_INTRODUCED_0_" },
-	"verson": "1.0"
+	"version": "1.0"
 }

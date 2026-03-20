@@ -601,7 +601,6 @@ where
 			name,
 			Variable {
 				ty,
-				value,
 				ann,
 				defined: flags.defined,
 				introduced: flags.introduced,
@@ -637,6 +636,7 @@ where
 }
 
 impl<'s, I, F> ParseState<'s, I, F> {
+	/// Create parser state backed by the shared alias map and interner.
 	pub(crate) fn new(aliases: &'s mut HashMap<String, Literal<I>>, interner: &'s mut F) -> Self {
 		Self { aliases, interner }
 	}
@@ -854,7 +854,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: true,
@@ -1190,7 +1189,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: true,
@@ -1205,7 +1203,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
-					value: None,
 					ann: vec![],
 					defined: true,
 					introduced: false,
@@ -1220,7 +1217,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Bool,
-					value: None,
 					ann: vec![],
 					defined: true,
 					introduced: true,
@@ -1239,7 +1235,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
-					value: None,
 					ann: vec![Annotation::Atom("mip".to_owned())],
 					defined: false,
 					introduced: false,
@@ -1258,7 +1253,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Float(Some(RangeList::from(1.0..=5.5))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1277,7 +1271,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(Some(RangeList::from(1..=5))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1292,7 +1285,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(Some(RangeList::from_iter([1..=1, 4..=4, 6..=6]))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1311,7 +1303,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::IntSet(Some(RangeList::from(1..=5))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1326,7 +1317,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::IntSet(Some(RangeList::from_iter([1..=1, 3..=3]))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1345,7 +1335,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Int(None),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1360,7 +1349,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Float(None),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1375,7 +1363,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				"x".to_owned(),
 				Variable {
 					ty: Type::Bool,
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,

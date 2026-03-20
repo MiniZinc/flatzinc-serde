@@ -116,15 +116,18 @@
 #[cfg(feature = "fzn")]
 mod fzn;
 #[cfg(feature = "serde")]
-mod serde;
-
-#[cfg(feature = "fzn")]
-use std::fmt::Debug;
-use std::{collections::BTreeMap, fmt::Display};
+mod serde_impl;
 
 #[cfg(feature = "serde")]
-use ::serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::{
+	collections::BTreeMap,
+	fmt::{Debug, Display},
+};
+
 pub use rangelist::RangeList;
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[cfg(feature = "fzn")]
 pub use crate::fzn::FznParseError;
@@ -214,14 +217,14 @@ pub struct Array<Identifier = String> {
 	pub ann: Vec<Annotation<Identifier>>,
 	#[cfg_attr(
 		feature = "serde",
-		serde(default, skip_serializing_if = "serde::is_false")
+		serde(default, skip_serializing_if = "serde_impl::is_false")
 	)]
 	/// This field is set to `true` when there is a constraint that has been
 	/// marked as defining this array.
 	pub defined: bool,
 	#[cfg_attr(
 		feature = "serde",
-		serde(default, skip_serializing_if = "serde::is_false")
+		serde(default, skip_serializing_if = "serde_impl::is_false")
 	)]
 	/// This field is set to `true` when the array has been introduced by the
 	/// MiniZinc compiler, rather than being explicitly defined at the top-level
@@ -257,7 +260,12 @@ pub struct Constraint<Identifier = String> {
 /// FlatZinc is (generally) a format produced by the MiniZinc compiler as a
 /// result of instantiating the parameter variables of a MiniZinc model and
 /// generating a solver-specific equisatisfiable model.
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+///
+/// During parsing, any variable right-hand side declarations are resolved
+/// eagerly. The resulting public model stores only non-aliased variables, while
+/// references in constraints, arrays, and objectives are rewritten to the
+/// resolved literals.
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[derive(Clone, PartialEq, Debug)]
 pub struct FlatZinc<
 	Identifier = String,
@@ -271,10 +279,8 @@ pub struct FlatZinc<
 			default,
 			bound(
 				serialize = "Identifier: Serialize, for<'a> &'a VarMap: IntoIterator<Item = (&'a Identifier, &'a Variable<Identifier>)>",
-				deserialize = "Identifier: Deserialize<'de>, VarMap: FromIterator<(Identifier, Variable<Identifier>)>"
 			),
-			deserialize_with = "serde::deserialize_key_value_object",
-			serialize_with = "serde::serialize_key_value_object"
+			serialize_with = "serde_impl::serialize_key_value_object"
 		)
 	)]
 	pub variables: VarMap,
@@ -285,28 +291,21 @@ pub struct FlatZinc<
 			default,
 			bound(
 				serialize = "Identifier: Serialize, for<'a> &'a ArrayMap: IntoIterator<Item = (&'a Identifier, &'a Array<Identifier>)>",
-				deserialize = "Identifier: Deserialize<'de>, ArrayMap: FromIterator<(Identifier, Array<Identifier>)>"
 			),
-			deserialize_with = "serde::deserialize_key_value_object",
-			serialize_with = "serde::serialize_key_value_object"
+			serialize_with = "serde_impl::serialize_key_value_object"
 		)
 	)]
 	pub arrays: ArrayMap,
 	/// A list of (solver-specific) constraints, that must be satisfied in a
 	/// solution.
-	#[cfg_attr(feature = "serde", serde(default))]
 	pub constraints: Vec<Constraint<Identifier>>,
 	/// A list of all identifiers for which the solver must produce output for
 	/// each solution
-	#[cfg_attr(feature = "serde", serde(default))]
 	pub output: Vec<Identifier>,
 	/// A specification of the goal of solving the FlatZinc instance.
 	pub solve: SolveObjective<Identifier>,
 	/// The version of the FlatZinc serialization specification used
-	#[cfg_attr(
-		feature = "serde",
-		serde(default, skip_serializing_if = "String::is_empty")
-	)]
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "String::is_empty"))]
 	pub version: String,
 }
 
@@ -329,8 +328,8 @@ pub enum Literal<Identifier = String> {
 	#[cfg_attr(
 		feature = "serde",
 		serde(
-			serialize_with = "serde::serialize_encapsulate_set",
-			deserialize_with = "serde::deserialize_encapsulated_set"
+			serialize_with = "serde_impl::serialize_encapsulate_set",
+			deserialize_with = "serde_impl::deserialize_encapsulated_set"
 		)
 	)]
 	/// Set of integers, represented as a list of integer ranges
@@ -338,8 +337,8 @@ pub enum Literal<Identifier = String> {
 	#[cfg_attr(
 		feature = "serde",
 		serde(
-			serialize_with = "serde::serialize_encapsulate_set",
-			deserialize_with = "serde::deserialize_encapsulated_set"
+			serialize_with = "serde_impl::serialize_encapsulate_set",
+			deserialize_with = "serde_impl::deserialize_encapsulated_set"
 		)
 	)]
 	/// Set of floating point values, represented as a list of floating point
@@ -348,8 +347,8 @@ pub enum Literal<Identifier = String> {
 	#[cfg_attr(
 		feature = "serde",
 		serde(
-			serialize_with = "serde::serialize_encapsulate_string",
-			deserialize_with = "serde::deserialize_encapsulated_string"
+			serialize_with = "serde_impl::serialize_encapsulate_string",
+			deserialize_with = "serde_impl::deserialize_encapsulated_string"
 		)
 	)]
 	/// String value
@@ -394,6 +393,10 @@ pub enum Type {
 }
 
 /// The definition of a decision variable
+///
+/// Any right-hand side declarations from the FlatZinc input are resolved during
+/// parsing and are therefore not stored on the public type. Standalone JSON
+/// deserialization of [`Variable`] values does not accept an `rhs` field.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Variable<Identifier = String> {
 	/// The type of the decision variable, and set of potential values  from
@@ -403,9 +406,6 @@ pub struct Variable<Identifier = String> {
 	/// If domain has the value `None`, then all values of the decision
 	/// variable's `Type` are allowed in a solution.
 	pub ty: Type,
-	/// The “right hand side” of the variable, i.e., its value or alias to
-	/// another variable
-	pub value: Option<Literal<Identifier>>,
 	/// A list of annotations
 	pub ann: Vec<Annotation<Identifier>>,
 	/// This field is set to `true` when there is a constraint that has been
@@ -503,10 +503,10 @@ impl<Identifier: Ord> Array<Identifier> {
 			Literal::FloatSet(_) => "set of float",
 			Literal::String(_) => "string",
 		};
-		let is_var = self.contents.iter().any(|lit| match lit {
-			Literal::Identifier(ident) => fzn.variables[ident].value.is_none(),
-			_ => false,
-		});
+		let is_var = self
+			.contents
+			.iter()
+			.any(|lit| matches!(lit, Literal::Identifier(_)));
 		(ty, is_var)
 	}
 }
@@ -533,31 +533,50 @@ impl<Identifier: Display> Display for Constraint<Identifier> {
 	}
 }
 
-#[cfg(feature = "fzn")]
 impl<Identifier, VarMap, ArrayMap> FlatZinc<Identifier, VarMap, ArrayMap>
 where
-	Identifier: Clone,
+	Identifier: Clone + Debug,
 	VarMap: FromIterator<(Identifier, Variable<Identifier>)>,
 	ArrayMap: FromIterator<(Identifier, Array<Identifier>)>,
 {
+	#[cfg(feature = "serde")]
+	/// Deserialize a FlatZinc JSON value using a custom identifier interner.
+	///
+	/// Variable right-hand side declarations are resolved eagerly, so aliased
+	/// variables are omitted from the returned [`FlatZinc::variables`] map.
+	pub fn deserialize_with_interner<'de, D, F, E>(
+		deserializer: D,
+		interner: F,
+	) -> Result<Self, D::Error>
+	where
+		D: Deserializer<'de>,
+		F: FnMut(Cow<'de, str>) -> Result<Identifier, E>,
+		E: Display,
+	{
+		serde_impl::seeded::deserialize_flatzinc_with_interner(deserializer, interner)
+	}
+
+	#[cfg(feature = "fzn")]
 	/// Parse a `.fzn` source into a [`FlatZinc`] instance.
 	pub fn from_fzn<E>(source: impl std::io::BufRead) -> Result<Self, FznParseError>
 	where
-		Identifier: Debug,
 		for<'a> Identifier: TryFrom<&'a str, Error = E>,
 		E: Display,
 	{
 		fzn::parse(source)
 	}
 
+	#[cfg(feature = "fzn")]
 	/// Parse a `.fzn` source into a [`FlatZinc`] instance using a custom
 	/// identifier interner.
+	///
+	/// Variable right-hand side declarations are resolved eagerly, so aliased
+	/// variables are omitted from the returned [`FlatZinc::variables`] map.
 	pub fn from_fzn_with_interner<F, E>(
 		source: impl std::io::BufRead,
 		interner: F,
 	) -> Result<Self, FznParseError>
 	where
-		Identifier: Debug,
 		F: FnMut(&str) -> Result<Identifier, E>,
 		E: Display,
 	{
@@ -601,9 +620,6 @@ impl<Identifier: Ord + Display> Display for FlatZinc<Identifier> {
 			}
 			for ann in &var.ann {
 				write!(f, " {ann}")?
-			}
-			if let Some(val) = &var.value {
-				write!(f, " = {val}")?
 			}
 			writeln!(f, ";")?
 		}

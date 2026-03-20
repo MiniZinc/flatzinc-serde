@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [**breaking**] The `Annotation` variant of `AnnotationLiteral` now directly includes a value of type `AnnotationCall<Identifier>`, to avoid the ambiguity of identifier-annotations already being able to be represented using `BaseLiteral`.
 - [**breaking**] The `domain` field of `Variable` has now moved to a variant argument on `Type`, accessible through the `ty` attribute.
 - [**breaking**] The `objective` field of the `SolveMethod` struct has now moved to a variant argument on `Method`, accessible through the `method` attribute.
+- [**breaking**] Change the default implementation of `variables` and `arrays` field of `FlatZinc` to be `std::collections::HashMap`.
+- Allow the usage of stateful interners for `Identifier` using `FlatZinc::deserialize_with_interner` and `FlatZinc::from_fzn_with_interner`.
+- [**breaking**] Remove the `value` field from `Variable`.
+  Any right-hand side value is now resolved during parsing.
 
 ## [0.4.4] - 2025-11-06
 
