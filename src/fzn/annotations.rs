@@ -1,26 +1,27 @@
-//! Parser for an FZN annotation.
+//! Parser helpers for FlatZinc annotations.
 
-use std::fmt::{Debug, Display};
+use std::fmt::Display;
 
 use winnow::{
 	Parser, Result,
 	combinator::{alt, delimited, opt, preceded, repeat, separated},
-	error::{ContextError, FromExternalError},
 };
 
 use crate::{
-	Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Literal,
-	fzn::{Stream, identifier, identifier_raw, literal, token},
+	fzn::{Stream, identifier, intern_parsed_identifier, literal, token},
+	intermediate::{
+		Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Literal, NameId,
+	},
 };
 
 /// Semantic flags projected out of special FlatZinc annotations.
 #[derive(Default)]
 pub(crate) struct AnnotationFlags {
-	/// Whether the variable is defined by a constraint
+	/// Whether the variable is defined by a constraint.
 	pub(crate) defined: bool,
 	/// Whether the variable was additionally introduced by the compiler.
 	pub(crate) introduced: bool,
-	/// Whether the variable is an output variable.
+	/// Whether the declaration should appear in the output.
 	pub(crate) output: bool,
 }
 
@@ -30,18 +31,18 @@ pub(crate) struct AnnotationFlags {
 /// <annotation> ::= <identifier>
 ///                | <identifier> "(" <ann-expr> "," ... ")"
 /// ```
-pub(super) fn annotation<'a, 's, I, F, E>(
-	input: &mut Stream<'a, 's, I, F>,
-) -> Result<(&'a str, Option<Vec<AnnotationArgument<I>>>)>
+pub(super) fn annotation<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<(&'a str, Option<Vec<AnnotationArgument<Identifier>>>)>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
 	preceded(
 		token("::"),
 		(
-			identifier_raw,
+			identifier,
 			opt(delimited(
 				token('('),
 				separated(0.., token(annotation_argument), token(',')),
@@ -52,19 +53,19 @@ where
 	.parse_next(input)
 }
 
-/// Parses an annotation argument (or annotation expression).
+/// Parse an annotation argument.
 ///
 /// ```bnf
 /// <ann-expr> := <basic-ann-expr>
 ///             | "[" [ <basic-ann-expr> "," ... ] "]"
 /// ```
-fn annotation_argument<'a, 's, I, F, E>(
-	input: &mut Stream<'a, 's, I, F>,
-) -> Result<AnnotationArgument<I>>
+fn annotation_argument<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<AnnotationArgument<Identifier>>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
 	alt((
 		annotation_literal.map(AnnotationArgument::Literal),
@@ -78,17 +79,23 @@ where
 	.parse_next(input)
 }
 
-/// Parses an annotation with arguments.
+/// Parse a nested annotation call.
 ///
 /// This does not have an analogue in the FZN grammar. It is only used to parse
 /// annotation arguments that are nested annotation calls.
-fn annotation_call<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<AnnotationCall<I>>
+///
+/// ```bnf
+/// <ann-call> ::= <identifier> "(" <ann-expr> "," ... ")"
+/// ```
+fn annotation_call<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<AnnotationCall<Identifier>>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
-	(
+	let (id, args) = (
 		identifier,
 		delimited(
 			token('('),
@@ -96,8 +103,30 @@ where
 			token(')'),
 		),
 	)
-		.map(|(id, args)| AnnotationCall { id, args })
-		.parse_next(input)
+		.parse_next(input)?;
+
+	Ok(AnnotationCall {
+		id: intern_parsed_identifier(input, id)?,
+		args,
+	})
+}
+
+/// Build a pending annotation from parsed identifier and optional arguments.
+fn annotation_from_parts<Identifier, F, E>(
+	input: &mut Stream<'_, Identifier, F>,
+	ident: &str,
+	args: Option<Vec<AnnotationArgument<Identifier>>>,
+) -> Result<Annotation<Identifier>>
+where
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
+	E: Display,
+{
+	let id = intern_parsed_identifier(input, ident)?;
+	Ok(match args {
+		Some(args) => Annotation::Call(AnnotationCall { id, args }),
+		None => Annotation::Atom(id),
+	})
 }
 
 /// Parses an annotation literal (or basic annotation expression).
@@ -108,65 +137,59 @@ where
 ///                   | <string-literal>
 ///                   | <annotation>
 /// ```
-fn annotation_literal<'a, 's, I, F, E>(
-	input: &mut Stream<'a, 's, I, F>,
-) -> Result<AnnotationLiteral<I>>
+fn annotation_literal<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<AnnotationLiteral<Identifier>>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
-	alt((
-		annotation_call.map(AnnotationLiteral::Annotation),
-		literal.map(AnnotationLiteral::BaseLiteral),
+	enum Parsed<Identifier> {
+		Annotation(AnnotationCall<Identifier>),
+		Literal(Literal),
+	}
+
+	let parsed = alt((
+		annotation_call.map(Parsed::Annotation),
+		literal.map(Parsed::Literal),
 	))
-	.parse_next(input)
+	.parse_next(input)?;
+
+	Ok(match parsed {
+		Parsed::Annotation(annotation) => AnnotationLiteral::Annotation(annotation),
+		Parsed::Literal(literal) => literal.into(),
+	})
 }
 
 /// Parses the annotations for a constraint, returning optionally the identifier
 /// of the defined variable and a list of annotations.
-pub(super) fn constraint_annotations<'a, 's, I, F, E>(
-	input: &mut Stream<'a, 's, I, F>,
-) -> Result<(Option<I>, Vec<Annotation<I>>)>
+pub(super) fn constraint_annotations<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<(Option<NameId>, Vec<Annotation<Identifier>>)>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
-	let anns: Vec<(&str, Option<Vec<AnnotationArgument<I>>>)> =
+	let anns: Vec<(&str, Option<Vec<AnnotationArgument<Identifier>>>)> =
 		repeat(0.., annotation).parse_next(input)?;
 	let mut defines = None;
 	let mut parsed = Vec::with_capacity(anns.len());
 
 	for (ident, args) in anns {
 		match (ident, args) {
-			("defines_var", Some(mut v))
-				if v.len() == 1
-					&& matches!(
-						v[0],
-						AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Identifier(_)
-						))
-					) =>
-			{
-				let AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-					Literal::Identifier(identifier),
-				)) = v.remove(0)
-				else {
-					unreachable!()
-				};
-				defines = Some(identifier);
+			("defines_var", Some(mut args)) if args.len() == 1 => {
+				if let AnnotationArgument::Literal(AnnotationLiteral::Reference(name)) =
+					args.remove(0)
+				{
+					defines = Some(name);
+					continue;
+				}
+				parsed.push(annotation_from_parts(input, ident, Some(args))?);
 			}
-			(ident, args) => {
-				let ident = input
-					.state
-					.intern(ident)
-					.map_err(|err| ContextError::from_external_error(input, err))?;
-				parsed.push(if let Some(args) = args {
-					Annotation::Call(AnnotationCall { id: ident, args })
-				} else {
-					Annotation::Atom(ident)
-				});
+			(other_ident, other_args) => {
+				parsed.push(annotation_from_parts(input, other_ident, other_args)?)
 			}
 		}
 	}
@@ -175,44 +198,32 @@ where
 }
 
 /// Parses a general list of annotations.
-pub(super) fn general_annotations<'a, 's, I, F, E>(
-	input: &mut Stream<'a, 's, I, F>,
-) -> Result<Vec<Annotation<I>>>
+pub(super) fn general_annotations<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<Vec<Annotation<Identifier>>>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
-	let anns: Vec<(&str, Option<Vec<AnnotationArgument<I>>>)> =
+	let anns: Vec<(&str, Option<Vec<AnnotationArgument<Identifier>>>)> =
 		repeat(0.., annotation).parse_next(input)?;
-	let mut parsed = Vec::with_capacity(anns.len());
-
-	for (ident, args) in anns {
-		let ident = input
-			.state
-			.intern(ident)
-			.map_err(|err| ContextError::from_external_error(input, err))?;
-		parsed.push(if let Some(args) = args {
-			Annotation::Call(AnnotationCall { id: ident, args })
-		} else {
-			Annotation::Atom(ident)
-		});
-	}
-
-	Ok(parsed)
+	anns.into_iter()
+		.map(|(ident, args)| annotation_from_parts(input, ident, args))
+		.collect()
 }
 
 /// Parses the annotations for a variable declaration, returning flags for
 /// standard annotations and a list of other annotations.
-pub(super) fn variable_annotations<I, F, E>(
-	input: &mut Stream<'_, '_, I, F>,
-) -> Result<(AnnotationFlags, Vec<Annotation<I>>)>
+pub(super) fn variable_annotations<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<(AnnotationFlags, Vec<Annotation<Identifier>>)>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
-	let anns: Vec<(&str, Option<Vec<AnnotationArgument<I>>>)> =
+	let anns: Vec<(&str, Option<Vec<AnnotationArgument<Identifier>>>)> =
 		repeat(0.., annotation).parse_next(input)?;
 	let mut flags = AnnotationFlags::default();
 	let mut parsed = Vec::with_capacity(anns.len());
@@ -223,16 +234,8 @@ where
 			("var_is_introduced", None) => flags.introduced = true,
 			("output_var", None) => flags.output = true,
 			("output_array", Some(_)) => flags.output = true,
-			(ident, args) => {
-				let ident = input
-					.state
-					.intern(ident)
-					.map_err(|err| ContextError::from_external_error(input, err))?;
-				parsed.push(if let Some(args) = args {
-					Annotation::Call(AnnotationCall { id: ident, args })
-				} else {
-					Annotation::Atom(ident)
-				});
+			(other_ident, other_args) => {
+				parsed.push(annotation_from_parts(input, other_ident, other_args)?)
 			}
 		}
 	}
@@ -245,92 +248,101 @@ mod tests {
 	use rangelist::RangeList;
 
 	use crate::{
-		Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Literal,
-		fzn::{general_annotations, tests::check_parser},
+		fzn::{
+			general_annotations,
+			tests::{annotation_identifier, parse_with_names},
+		},
+		intermediate::{Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral},
 	};
 
 	#[test]
 	fn annotation_call_with_array_argument() {
-		check_parser(
+		let (actual, _) = parse_with_names(
 			general_annotations,
+			":: some_annotation([other_annotation(5), 3.4])",
+		);
+		assert_eq!(
+			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
 				args: vec![AnnotationArgument::Array(vec![
 					AnnotationLiteral::Annotation(AnnotationCall {
 						id: "other_annotation".to_owned(),
-						args: vec![AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Int(5),
-						))],
+						args: vec![AnnotationArgument::Literal(AnnotationLiteral::Int(5),)],
 					}),
-					AnnotationLiteral::BaseLiteral(Literal::Float(3.4)),
+					AnnotationLiteral::Float(3.4),
 				])],
 			})],
-			":: some_annotation([other_annotation(5), 3.4])",
 		);
 	}
 
 	#[test]
 	fn annotation_call_with_literal_argument() {
-		check_parser(
-			general_annotations,
+		let (actual, names) =
+			parse_with_names(general_annotations, ":: some_annotation(other_annotation)");
+		assert_eq!(
+			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
-				args: vec![AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-					Literal::Identifier("other_annotation".to_owned()),
-				))],
+				args: vec![AnnotationArgument::Literal(annotation_identifier(
+					&names,
+					"other_annotation"
+				),)],
 			})],
-			":: some_annotation(other_annotation)",
 		);
-		check_parser(
-			general_annotations,
+
+		let (actual, _) = parse_with_names(general_annotations, ":: some_annotation(1..5)");
+		assert_eq!(
+			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
-				args: vec![AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-					Literal::IntSet(RangeList::from(1..=5)),
-				))],
+				args: vec![AnnotationArgument::Literal(AnnotationLiteral::IntSet(
+					RangeList::from(1..=5)
+				),)],
 			})],
-			":: some_annotation(1..5)",
 		);
 	}
 
 	#[test]
 	fn annotation_call_with_nested_annotation_call_argument() {
-		check_parser(
+		let (actual, _) = parse_with_names(
 			general_annotations,
+			":: some_annotation(other_annotation(5))",
+		);
+		assert_eq!(
+			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
 				args: vec![AnnotationArgument::Literal(AnnotationLiteral::Annotation(
 					AnnotationCall {
 						id: "other_annotation".to_owned(),
-						args: vec![AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Int(5),
-						))],
-					},
-				))],
+						args: vec![AnnotationArgument::Literal(AnnotationLiteral::Int(5),)],
+					}
+				),)],
 			})],
-			":: some_annotation(other_annotation(5))",
 		);
-		check_parser(
+
+		let (actual, _) = parse_with_names(
 			general_annotations,
+			":: some_annotation(another_annotation ())",
+		);
+		assert_eq!(
+			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
 				args: vec![AnnotationArgument::Literal(AnnotationLiteral::Annotation(
 					AnnotationCall {
 						id: "another_annotation".to_owned(),
 						args: vec![],
-					},
-				))],
+					}
+				),)],
 			})],
-			":: some_annotation(another_annotation ())",
 		);
 	}
 
 	#[test]
 	fn atom_annotation() {
-		check_parser(
-			general_annotations,
-			vec![Annotation::Atom("output_var".to_owned())],
-			":: output_var",
-		);
+		let (actual, _) = parse_with_names(general_annotations, ":: output_var");
+		assert_eq!(actual, vec![Annotation::Atom("output_var".to_owned())]);
 	}
 }

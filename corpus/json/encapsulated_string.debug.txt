@@ -1,6 +1,6 @@
 FlatZinc {
-    variables: {},
-    arrays: {},
+    variables: [],
+    arrays: [],
     constraints: [],
     output: [],
     solve: SolveObjective {
@@ -11,10 +11,8 @@ FlatZinc {
                     id: "myAnn",
                     args: [
                         Literal(
-                            BaseLiteral(
-                                String(
-                                    "my string",
-                                ),
+                            String(
+                                "my string",
                             ),
                         ),
                     ],

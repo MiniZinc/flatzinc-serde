@@ -1,38 +1,26 @@
 //! Parse the original `.fzn` file format.
 
 mod annotations;
-mod error;
 mod primitives;
 
-use std::{
-	collections::HashMap,
-	fmt::{Debug, Display, Formatter},
-	io::BufRead,
-};
+use std::{fmt::Display, io::BufRead};
 
 use annotations::*;
-pub use error::FznParseError;
 use primitives::*;
 use winnow::{
 	Parser, Result, Stateful,
 	combinator::{alt, delimited, opt, preceded, separated, separated_pair},
-	error::FromExternalError,
+	error::ContextError,
 };
 
 use crate::{
-	Argument, Array, Constraint, FlatZinc, Literal, Method, SolveObjective, Type, Variable,
+	FlatZinc, Type,
+	error::FznParseError,
+	intermediate::{
+		self, Argument, Array, Constraint, Declaration, Literal, Method, NameId, ParserState,
+		SolveObjective, Variable,
+	},
 };
-
-/// A declaration item in a FlatZinc model.
-#[derive(Debug, PartialEq)]
-enum Declaration<Identifier> {
-	/// A parameter declaration.
-	Parameter((String, Literal<Identifier>)),
-	/// A variable declaration.
-	Variable((Identifier, Variable<Identifier>, bool)),
-	/// An array declaration.
-	Array((Identifier, Array<Identifier>, bool)),
-}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 /// Represents the current parsing phase.
@@ -49,16 +37,8 @@ enum ParsePhase {
 	Solve,
 }
 
-/// State used during parsing.
-struct ParseState<'s, I, F> {
-	/// Collection of parsed parameters to be replaced in constraint arguments.
-	aliases: &'s mut HashMap<String, Literal<I>>,
-	/// Function used to intern identifiers.
-	interner: &'s mut F,
-}
-
 /// Type used for the parser input and state.
-type Stream<'source, 'state, I, F> = Stateful<&'source str, ParseState<'state, I, F>>;
+pub(crate) type Stream<'source, Identifier, F> = Stateful<&'source str, ParserState<Identifier, F>>;
 
 /// Parses a constraint argument.
 ///
@@ -66,12 +46,7 @@ type Stream<'source, 'state, I, F> = Stateful<&'source str, ParseState<'state, I
 /// <expr> ::= <basic-expr>
 ///          | <array-literal>
 /// ```
-fn argument<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<Argument<I>>
-where
-	F: FnMut(&str) -> std::result::Result<I, E>,
-	E: Display,
-	I: Clone + Debug,
-{
+fn argument<'a, Identifier, F>(input: &mut Stream<'a, Identifier, F>) -> Result<Argument> {
 	alt((
 		literal.map(Argument::Literal),
 		delimited(
@@ -85,11 +60,18 @@ where
 }
 
 /// Parse an array declaration.
-fn array_item<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<(I, Array<I>, bool)>
+///
+/// ```bnf
+/// <array-item> ::= "array" "[" <int-set> "]" "of" ["var"] <var-type>
+///                  ":" <identifier> <annotations> "=" "[" <basic-expr> "," ... "]" ";"
+/// ```
+fn array_item<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<(NameId, Array<Identifier>, bool)>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
 	let _ = token("array").parse_next(input)?;
 	let _ = delimited(token("["), interval_set(int), token("]")).parse_next(input)?;
@@ -99,12 +81,13 @@ where
 
 	let _ = token(":").parse_next(input)?;
 	let id = token(identifier).parse_next(input)?;
+	let name = input.state.intern_name(id);
 	let (flags, ann) = variable_annotations.parse_next(input)?;
 	let contents = preceded(token("="), delimited_list("[", literal, "]")).parse_next(input)?;
 	let _ = token(";").parse_next(input)?;
 
 	Ok((
-		id,
+		name,
 		Array {
 			contents,
 			ann,
@@ -121,12 +104,9 @@ where
 /// <basic-par-type> ::= "bool"
 ///                    | "int"
 ///                    | "float"
-///                    | "set of int"
+///                    | "set" "of" "int"
 /// ```
-fn basic_parameter_type<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<Type>
-where
-	I: Debug,
-{
+fn basic_parameter_type<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<Type> {
 	alt((
 		"bool".map(|_| Type::Bool),
 		"int".map(|_| Type::Int(None)),
@@ -149,10 +129,7 @@ where
 ///                    | "var" "set" "of" <int-literal> ".." <int-literal>
 ///                    | "var" "set" "of" "{" [ <int-literal> "," ... ] "}"
 /// ```
-fn basic_variable_type<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<Type>
-where
-	I: Debug,
-{
+fn basic_variable_type<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<Type> {
 	alt((
 		basic_parameter_type,
 		preceded((token("set"), token("of")), set(int)).map(|values| Type::IntSet(Some(values))),
@@ -167,13 +144,15 @@ where
 /// ```bnf
 /// <constraint-item> ::= "constraint" <identifier> "(" [ <expr> "," ... ] ")" <annotations> ";"
 /// ```
-fn constraint<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<Constraint<I>>
+fn constraint<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<Constraint<Identifier>>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
-	(
+	let (_, id, args, (defines, ann), _) = (
 		token("constraint"),
 		token(identifier),
 		delimited(
@@ -184,89 +163,128 @@ where
 		constraint_annotations,
 		token(";"),
 	)
-		.map(|(_, id, args, (defines, ann), _)| Constraint {
-			id,
-			args,
-			ann,
-			defines,
-		})
-		.parse_next(input)
+		.parse_next(input)?;
+	Ok(Constraint {
+		id: intern_parsed_identifier(input, id)?,
+		args,
+		ann,
+		defines,
+	})
 }
 
 /// Parse a declaration item.
-fn declaration<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<Option<Declaration<I>>>
+///
+/// ```bnf
+/// <item> ::= <array-item>
+///          | <var-decl-item>
+///          | <par-decl-item>
+/// ```
+fn declaration<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<(NameId, Declaration<Identifier>, bool)>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
 	alt((
-		array_item.map(Declaration::Array).map(Some),
-		variable.map(|opt| opt.map(Declaration::Variable)),
-		parameter_item.map(Declaration::Parameter).map(Some),
+		array_item.map(|(name, arr, output)| (name, Declaration::Array(arr), output)),
+		variable_declaration.map(|(name, var, output)| (name, Declaration::Variable(var), output)),
+		parameter_item.map(|(name, var)| (name, Declaration::Variable(var), false)),
 	))
 	.parse_next(input)
 }
 
-/// Parse a parameter declaration item.
-fn parameter_item<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<(String, Literal<I>)>
+/// Intern one parsed identifier while preserving `.fzn`-specific identifier
+/// failures across parser-combinator unwinding.
+fn intern_parsed_identifier<Identifier, F, E>(
+	input: &mut Stream<'_, Identifier, F>,
+	ident: &str,
+) -> Result<Identifier>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
-	delimited(
-		(basic_parameter_type, token(":")),
-		separated_pair(
-			token(identifier_raw.map(str::to_owned)),
-			token("="),
-			token(literal),
-		),
+	match input.state.intern_identifier(ident) {
+		Ok(identifier) => Ok(identifier),
+		Err(error) => {
+			input.state.record_identifier_error(ident, error);
+			Err(<ContextError as winnow::error::ParserError<_>>::from_input(
+				input,
+			))
+		}
+	}
+}
+
+/// Convert a parser failure into the richer public `.fzn` identifier error
+/// when a frontend interner failure was recorded in the shared parser state.
+fn map_parse_error<Identifier, F>(
+	stream: &mut Stream<'_, Identifier, F>,
+	error: ContextError,
+) -> FznParseError {
+	stream.state.take_identifier_error().map_or_else(
+		|| FznParseError::SyntaxError(error.to_string()),
+		|error| error.into(),
+	)
+}
+
+/// Parse a parameter declaration item.
+///
+/// ```bnf
+/// <par-decl-item> ::= <par-type> ":" <identifier> "=" <basic-expr> ";"
+/// ```
+fn parameter_item<'a, Identifier, F>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<(NameId, Variable<Identifier>)> {
+	let (ty, _, (name, literal), _) = (
+		basic_parameter_type,
+		token(":"),
+		separated_pair(token(identifier), token("="), token(literal)),
 		token(";"),
 	)
-	.parse_next(input)
+		.parse_next(input)?;
+	Ok((
+		input.state.intern_name(name),
+		Variable {
+			ty,
+			value: Some(literal),
+			ann: Vec::new(),
+			defined: false,
+			introduced: false,
+		},
+	))
 }
 
 /// Parse the `.fzn` source to a [`FlatZinc`] instance.
 ///
 /// This is used by [`crate::FlatZinc::from_fzn`], which is the public entry
 /// point for `.fzn` parsing.
-pub(crate) fn parse<I, VarMap, ArrayMap, E>(
-	source: impl BufRead,
-) -> Result<FlatZinc<I, VarMap, ArrayMap>, FznParseError>
+pub(crate) fn parse<I, E>(source: impl BufRead) -> Result<FlatZinc<I>, FznParseError>
 where
 	I: Clone + for<'a> TryFrom<&'a str, Error = E>,
 	E: Display,
-	I: Debug,
-	VarMap: FromIterator<(I, Variable<I>)>,
-	ArrayMap: FromIterator<(I, Array<I>)>,
 {
 	parse_with_interner(source, |s: &str| I::try_from(s))
 }
 
-/// Parse the `.fzn` source to a [`FlatZinc`] instance.
-///
-/// This is used by [`crate::FlatZinc::from_fzn`], which is the public entry
-/// point for `.fzn` parsing.
-pub(crate) fn parse_with_interner<I, VM, AM, F, E>(
+/// Parse the `.fzn` source to a [`FlatZinc`] instance using a custom
+/// identifier interner.
+pub(crate) fn parse_with_interner<I, F, E>(
 	mut source: impl BufRead,
 	mut interner: F,
-) -> Result<FlatZinc<I, VM, AM>, FznParseError>
+) -> Result<FlatZinc<I>, FznParseError>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	I: Clone,
+	F: FnMut(&str) -> Result<I, E>,
 	E: Display,
-	I: Clone + Debug,
-	VM: FromIterator<(I, Variable<I>)>,
-	AM: FromIterator<(I, Array<I>)>,
 {
-	let mut variables = Vec::new();
-	let mut arrays = Vec::new();
+	let mut state = Some(ParserState::new(&mut interner));
 	let mut constraints = Vec::new();
 	let mut output = Vec::new();
 	let mut solve = None;
 
 	let mut buffer = Vec::new();
-	let mut parameters = HashMap::default();
 	let mut phase = ParsePhase::Predicates;
 
 	loop {
@@ -277,14 +295,16 @@ where
 
 		let mut stream = Stateful {
 			input: std::str::from_utf8(&buffer)?,
-			state: ParseState::new(&mut parameters, &mut interner),
+			state: state
+				.take()
+				.expect("parser state must be restored after each statement"),
 		};
 
-		// Check whether the statement only contains whitespace and comments
 		token(())
 			.parse_next(&mut stream)
-			.map_err(|error| FznParseError::SyntaxError(error.to_string()))?;
+			.map_err(|error| map_parse_error(&mut stream, error))?;
 		if stream.input.is_empty() {
+			state = Some(stream.state);
 			continue;
 		}
 
@@ -297,7 +317,8 @@ where
 			}
 			token(predicate_item)
 				.parse_next(&mut stream)
-				.map_err(|error| FznParseError::SyntaxError(error.to_string()))?;
+				.map_err(|error| map_parse_error(&mut stream, error))?;
+			state = Some(stream.state);
 			continue;
 		}
 
@@ -310,8 +331,9 @@ where
 			phase = ParsePhase::Constraints;
 			let constraint = token(constraint)
 				.parse_next(&mut stream)
-				.map_err(|error| FznParseError::SyntaxError(error.to_string()))?;
+				.map_err(|error| map_parse_error(&mut stream, error))?;
 			constraints.push(constraint);
+			state = Some(stream.state);
 			continue;
 		}
 
@@ -322,8 +344,9 @@ where
 			phase = ParsePhase::Solve;
 			let solve_objective = token(solve_objective)
 				.parse_next(&mut stream)
-				.map_err(|error| FznParseError::SyntaxError(error.to_string()))?;
+				.map_err(|error| map_parse_error(&mut stream, error))?;
 			solve = Some(solve_objective);
+			state = Some(stream.state);
 			continue;
 		}
 
@@ -334,39 +357,28 @@ where
 		}
 		phase = ParsePhase::Declarations;
 
-		let declaration = token(declaration)
+		let (name, declaration, is_output) = token(declaration)
 			.parse_next(&mut stream)
-			.map_err(|error| FznParseError::SyntaxError(error.to_string()))?;
-		match declaration {
-			Some(Declaration::Parameter((name, literal))) => {
-				stream.state.insert(name, literal);
-			}
-			Some(Declaration::Variable((name, variable, is_output))) => {
-				if is_output {
-					output.push(name.clone());
-				}
-				variables.push((name, variable));
-			}
-			Some(Declaration::Array((name, array, is_output))) => {
-				if is_output {
-					output.push(name.clone());
-				}
-				arrays.push((name, array));
-			}
-			None => {
-				// Added to the alias map
-			}
+			.map_err(|error| map_parse_error(&mut stream, error))?;
+		if is_output {
+			output.push(name);
 		}
+		stream.state.define_name(name, declaration)?;
+		state = Some(stream.state);
 	}
 
-	Ok(FlatZinc {
-		variables: variables.into_iter().collect(),
-		arrays: arrays.into_iter().collect(),
+	let (names, interner) = state
+		.expect("parser state must be present after parsing")
+		.into_parts();
+
+	let pending = intermediate::FlatZinc {
+		names,
 		constraints,
 		output,
 		solve: solve.ok_or(FznParseError::MissingSolveItem)?,
 		version: "1.0".to_owned(),
-	})
+	};
+	FlatZinc::from_intermediate(pending, interner).map_err(|err| err.into())
 }
 
 /// Parses a predicate item.
@@ -374,12 +386,7 @@ where
 /// ```bnf
 /// <predicate-item> ::= "predicate" <identifier> "(" [ <pred-param-type> : <identifier> "," ... ] ")" ";"
 /// ```
-fn predicate_item<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<()>
-where
-	F: FnMut(&str) -> std::result::Result<I, E>,
-	E: Display,
-	I: Clone + Debug,
-{
+fn predicate_item<'a, Identifier, F>(input: &mut Stream<'a, Identifier, F>) -> Result<()> {
 	(
 		token("predicate"),
 		token(identifier),
@@ -397,12 +404,7 @@ where
 /// ```bnf
 /// <pred-param-type> ":" <identifier>
 /// ```
-fn predicate_parameter<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<()>
-where
-	F: FnMut(&str) -> std::result::Result<I, E>,
-	E: Display,
-	I: Clone + Debug,
-{
+fn predicate_parameter<'a, Identifier, F>(input: &mut Stream<'a, Identifier, F>) -> Result<()> {
 	separated_pair(
 		token(predicate_parameter_type),
 		token(":"),
@@ -427,14 +429,10 @@ where
 ///                           | "set" "of" <set-float-literal>
 ///                           | "set" "of" <set-int-literal>
 /// ```
-fn predicate_parameter_type<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
-where
-	I: Debug,
-{
-	fn basic_predicate_parameter_type<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
-	where
-		I: Debug,
-	{
+fn predicate_parameter_type<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<()> {
+	fn basic_predicate_parameter_type<Identifier, F>(
+		input: &mut Stream<'_, Identifier, F>,
+	) -> Result<()> {
 		alt((
 			basic_parameter_type.map(|_| ()),
 			(token("set"), token("of"), token("float")).map(|_| ()),
@@ -538,276 +536,318 @@ fn read_statement(source: &mut impl BufRead, buffer: &mut Vec<u8>) -> Result<(),
 ///
 /// ```bnf
 /// <solve-item> ::= "solve" <annotations> "satisfy" ";"
-///                | "solve" <annotations> "minimize" <basic-expr> ";"
-///                | "solve" <annotations> "maximize" <basic-expr> ";"
+///                | "solve" <annotations> "minimize" <identifier> ";"
+///                | "solve" <annotations> "maximize" <identifier> ";"
 /// ```
-fn solve_objective<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<SolveObjective<I>>
+fn solve_objective<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<SolveObjective<Identifier>>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
-	(
+	enum ParsedMethod<'a> {
+		Satisfy,
+		Minimize(&'a str),
+		Maximize(&'a str),
+	}
+
+	let parsed = (
 		token("solve"),
 		general_annotations,
 		alt((
-			token("satisfy").map(|_| Method::Satisfy),
-			preceded(
-				token("minimize"),
-				token(identifier.map(Literal::Identifier)),
-			)
-			.map(Method::Minimize),
-			preceded(
-				token("maximize"),
-				token(identifier.map(Literal::Identifier)),
-			)
-			.map(Method::Maximize),
+			token("satisfy").map(|_| ParsedMethod::Satisfy),
+			preceded(token("minimize"), token(identifier)).map(ParsedMethod::Minimize),
+			preceded(token("maximize"), token(identifier)).map(ParsedMethod::Maximize),
 		)),
 		token(";"),
 	)
-		.map(|(_, ann, method, _)| SolveObjective { method, ann })
-		.parse_next(input)
+		.parse_next(input)?;
+
+	let (_, ann, method, _) = parsed;
+	let method = match method {
+		ParsedMethod::Satisfy => Method::Satisfy,
+		ParsedMethod::Minimize(name) => {
+			Method::Minimize(Literal::Reference(input.state.intern_name(name)))
+		}
+		ParsedMethod::Maximize(name) => {
+			Method::Maximize(Literal::Reference(input.state.intern_name(name)))
+		}
+	};
+	Ok(SolveObjective { method, ann })
 }
 
-/// Parse a variable declaration item.
-fn variable<'a, 's, I, F, E>(
-	input: &mut Stream<'a, 's, I, F>,
-) -> Result<Option<(I, Variable<I>, bool)>>
+/// Parse a variable declaration item for use in the top-level declaration
+/// stream.
+///
+/// ```bnf
+/// <var-decl-item> ::= "var" <var-type> ":" <identifier>
+///                     <annotations> ["=" <basic-expr>] ";"
+/// ```
+fn variable_declaration<'a, Identifier, F, E>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<(NameId, Variable<Identifier>, bool)>
 where
-	F: FnMut(&str) -> std::result::Result<I, E>,
+	Identifier: Clone,
+	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
-	I: Clone + Debug,
 {
 	let (_, ty, _, name, (flags, ann), value, _) = (
 		token("var"),
 		token(basic_variable_type),
 		token(":"),
-		token(identifier_raw),
+		token(identifier),
 		variable_annotations,
 		opt(preceded(token("="), token(literal))),
 		token(";"),
 	)
 		.parse_next(input)?;
-	let result = if let Some(value) = value {
-		debug_assert!(!flags.output, "output variable cannot have a value");
-		input.state.insert(name.to_owned(), value);
-		None
-	} else {
-		let name = input
-			.state
-			.intern(name)
-			.map_err(|err| winnow::error::ContextError::from_external_error(input, err))?;
-		Some((
-			name,
-			Variable {
-				ty,
-				ann,
-				defined: flags.defined,
-				introduced: flags.introduced,
-			},
-			flags.output,
-		))
-	};
-	Ok(result)
-}
+	let name = input.state.intern_name(name);
 
-impl<I, F, E> ParseState<'_, I, F>
-where
-	F: FnMut(&str) -> std::result::Result<I, E>,
-	E: Display,
-{
-	/// Inserts an alias for an identifier, replacing any existing value.
-	fn insert(&mut self, name: String, value: Literal<I>) {
-		let _ = self.aliases.insert(name, value);
-	}
-
-	/// Interns an identifier, returning an error if the interner fails.
-	fn intern(&mut self, string: &str) -> Result<I, FznParseError> {
-		(self.interner)(string).map_err(|e| FznParseError::IdentifierError {
-			ident: string.to_owned(),
-			err: e.to_string(),
-		})
-	}
-
-	/// Resolves an identifier to a [`Literal`], if it has been aliased.
-	fn resolve(&self, name: &str) -> Option<&Literal<I>> {
-		self.aliases.get(name)
-	}
-}
-
-impl<'s, I, F> ParseState<'s, I, F> {
-	/// Create parser state backed by the shared alias map and interner.
-	pub(crate) fn new(aliases: &'s mut HashMap<String, Literal<I>>, interner: &'s mut F) -> Self {
-		Self { aliases, interner }
-	}
-}
-
-impl<I: Debug, F> Debug for ParseState<'_, I, F> {
-	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("ParseState")
-			.field("aliases", &self.aliases)
-			.field("interner", &"...")
-			.finish()
-	}
+	Ok((
+		name,
+		Variable {
+			ty,
+			value,
+			ann,
+			defined: flags.defined,
+			introduced: flags.introduced,
+		},
+		flags.output,
+	))
 }
 
 #[cfg(test)]
 mod tests {
+	macro_rules! test_file {
+		($file: ident) => {
+			#[test]
+			fn $file() {
+				let s = format!("./corpus/fzn/{}.fzn", stringify!($file));
+				let path = std::path::Path::new(&s);
+				let fzn_file = File::open(path).unwrap();
+				let fzn_reader = BufReader::new(fzn_file);
+				let actual: FlatZinc = FlatZinc::from_fzn(fzn_reader).unwrap();
+
+				let expected = expect_test::expect_file![&format!(
+					"../corpus/fzn/{}.expected",
+					stringify!($file)
+				)];
+				expected.assert_eq(&actual.to_string());
+			}
+		};
+	}
+
 	use std::{
-		collections::HashMap,
 		convert::Infallible,
 		fmt::Debug,
 		fs::File,
 		io::{BufReader, Cursor},
-		path::PathBuf,
+		sync::Arc,
 	};
 
 	use rangelist::RangeList;
 	use ustr::Ustr;
-	use winnow::{Parser, Stateful, error::ParserError};
+	use winnow::{Parser, Stateful};
 
 	use crate::{
-		Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Argument, Array,
-		Constraint, FlatZinc, FznParseError, Literal, Method, SolveObjective, Type, Variable,
+		FlatZinc, FznParseError, LinkError, NamedRef, Type,
 		fzn::{
-			ParseState, Stream, array_item, constraint, parameter_item, predicate_item,
-			solve_objective, variable,
+			Stream, array_item, constraint, parameter_item, predicate_item, solve_objective,
+			variable_declaration,
+		},
+		intermediate::{
+			Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Argument, Array,
+			Constraint, Literal, Method, NameId, NameStore, ParserState, SolveObjective, Variable,
 		},
 	};
 
 	#[test]
+	fn aliases_are_resolved_when_linking_public_ast() {
+		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
+			"int: y = 5;\nvar int: x;\nconstraint int_eq(y, x);\nsolve satisfy;",
+		))
+		.expect("failed to parse model with parameter alias");
+
+		assert_eq!(fzn.variables.len(), 1);
+		assert_eq!(fzn.variables[0].name, "x");
+		assert_eq!(
+			fzn.constraints[0].args[0],
+			crate::Argument::Literal(crate::Literal::Int(5))
+		);
+		let crate::Argument::Literal(crate::Literal::Variable(variable)) =
+			&fzn.constraints[0].args[1]
+		else {
+			unreachable!();
+		};
+		assert_eq!(variable.name, "x");
+	}
+
+	pub(crate) fn annotation_identifier(
+		names: &NameStore<String>,
+		name: &str,
+	) -> AnnotationLiteral<String> {
+		AnnotationLiteral::Reference(name_id(names, name))
+	}
+
+	#[test]
+	fn arrays_and_variables_are_linked_in_public_ast() {
+		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
+			"var int: x;\narray [1..2] of var int: xs = [x, x];\nsolve satisfy;",
+		))
+		.expect("failed to parse model with array references");
+
+		assert!(has_variable(&fzn, "x"));
+		assert!(has_array(&fzn, "xs"));
+		assert_eq!(fzn.arrays[0].contents.len(), 2);
+	}
+
+	#[test]
+	fn arrays_are_parsed_and_promoted() {
+		let (actual, names) = parse_with_names(
+			array_item,
+			"array [1..2] of var int: xs :: output_array([1..2]) :: var_is_introduced = [x, y];",
+		);
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "xs"),
+				Array {
+					contents: vec![reference(&names, "x"), reference(&names, "y")],
+					ann: vec![],
+					defined: false,
+					introduced: true,
+				},
+				true,
+			),
+		);
+
+		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
+			"var int: x;\nvar int: y;\narray [1..2] of var int: xs :: output_array([1..2]) = [x, y];\nsolve satisfy;",
+		))
+		.expect("failed to parse output array model");
+		assert_eq!(output_names(&fzn), vec!["xs"]);
+	}
+
+	#[test]
 	fn basic_constraint_with_array_argument() {
-		check_parser(
-			constraint,
+		let (actual, names) = parse_with_names(constraint, "constraint all_different([x, y]);");
+		assert_eq!(
+			actual,
 			Constraint {
 				id: "all_different".into(),
 				args: vec![Argument::Array(vec![
-					Literal::Identifier("x".to_owned()),
-					Literal::Identifier("y".to_owned()),
+					reference(&names, "x"),
+					reference(&names, "y"),
 				])],
 				defines: None,
 				ann: vec![],
 			},
-			"constraint all_different([x, y]);",
 		);
 	}
 
 	#[test]
 	fn basic_constraint_with_identifier_arguments() {
-		check_parser(
-			constraint,
+		let (actual, names) = parse_with_names(constraint, "constraint int_lt(x, y);");
+		assert_eq!(
+			actual,
 			Constraint {
 				id: "int_lt".into(),
 				args: vec![
-					Argument::Literal(Literal::Identifier("x".to_owned())),
-					Argument::Literal(Literal::Identifier("y".to_owned())),
+					Argument::Literal(reference(&names, "x")),
+					Argument::Literal(reference(&names, "y")),
 				],
 				defines: None,
 				ann: vec![],
 			},
-			"constraint int_lt(x, y);",
 		);
 	}
 
 	#[test]
 	fn basic_constraint_with_identifier_arguments_and_annotation() {
-		check_parser(
-			constraint,
+		let (actual, names) =
+			parse_with_names(constraint, "constraint int_lt(x, y) :: domain_consistent;");
+		assert_eq!(
+			actual,
 			Constraint {
 				id: "int_lt".into(),
 				args: vec![
-					Argument::Literal(Literal::Identifier("x".to_owned())),
-					Argument::Literal(Literal::Identifier("y".to_owned())),
+					Argument::Literal(reference(&names, "x")),
+					Argument::Literal(reference(&names, "y")),
 				],
 				defines: None,
 				ann: vec![Annotation::Atom("domain_consistent".to_owned())],
 			},
-			"constraint int_lt(x, y) :: domain_consistent;",
 		);
-	}
-
-pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s str)
-	where
-		P: for<'state> Parser<
-			Stream<'s, 'state, String, fn(&str) -> Result<String, Infallible>>,
-			O,
-			E,
-		>,
-		O: Debug + PartialEq,
-		E: for<'state> ParserError<
-				Stream<'s, 'state, String, fn(&str) -> Result<String, Infallible>>,
-			> + Debug,
-		for<'state> <E as ParserError<
-			Stream<'s, 'state, String, fn(&str) -> Result<String, Infallible>>,
-		>>::Inner: ParserError<
-				Stream<'s, 'state, String, fn(&str) -> Result<String, Infallible>>,
-			> + Debug,
-	{
-		let mut aliases = HashMap::default();
-		let mut interner: fn(&str) -> Result<String, Infallible> = string_interner_helper;
-
-		let stream = Stateful {
-			input,
-			state: ParseState::new(&mut aliases, &mut interner),
-		};
-
-		let parsed = parser.parse(stream);
-		match parsed {
-			Ok(actual) => assert_eq!(expected, actual),
-			Err(err) => panic!("parser returned unexpected error: {err:?}"),
-		}
 	}
 
 	#[test]
 	fn constraint_defines_var_annotation_is_promoted() {
-		check_parser(
-			constraint,
+		let (actual, names) =
+			parse_with_names(constraint, "constraint bool2int(b, x) :: defines_var(x);");
+		assert_eq!(
+			actual,
 			Constraint {
 				id: "bool2int".into(),
 				args: vec![
-					Argument::Literal(Literal::Identifier("b".to_owned())),
-					Argument::Literal(Literal::Identifier("x".to_owned())),
+					Argument::Literal(reference(&names, "b")),
+					Argument::Literal(reference(&names, "x")),
 				],
-				defines: Some("x".to_owned()),
+				defines: Some(name_id(&names, "x")),
 				ann: vec![],
 			},
-			"constraint bool2int(b, x) :: defines_var(x);",
 		);
 	}
 
 	#[test]
 	fn constraint_keeps_non_semantic_annotations_after_promotion() {
-		check_parser(
+		let (actual, names) = parse_with_names(
 			constraint,
+			"constraint int_lin_eq([400, 450, -1], [b, c, obj], 0) :: defines_var(obj) :: ctx_pos;",
+		);
+		assert_eq!(
+			actual,
 			Constraint {
 				id: "int_lin_eq".into(),
 				args: vec![
-					Argument::Array(vec![Literal::Int(400), Literal::Int(450), Literal::Int(-1)]),
+					Argument::Array(vec![Literal::Int(400), Literal::Int(450), Literal::Int(-1),]),
 					Argument::Array(vec![
-						Literal::Identifier("b".to_owned()),
-						Literal::Identifier("c".to_owned()),
-						Literal::Identifier("obj".to_owned()),
+						reference(&names, "b"),
+						reference(&names, "c"),
+						reference(&names, "obj"),
 					]),
 					Argument::Literal(Literal::Int(0)),
 				],
-				defines: Some("obj".to_owned()),
+				defines: Some(name_id(&names, "obj")),
 				ann: vec![Annotation::Atom("ctx_pos".to_owned())],
 			},
-			"constraint int_lin_eq([400, 450, -1], [b, c, obj], 0) :: defines_var(obj) :: ctx_pos;",
 		);
+	}
+
+	fn has_array<Identifier>(fzn: &FlatZinc<Identifier>, name: &str) -> bool {
+		fzn.arrays.iter().any(|array| array.name == name)
+	}
+
+	fn has_variable<Identifier>(fzn: &FlatZinc<Identifier>, name: &str) -> bool {
+		fzn.variables.iter().any(|variable| variable.name == name)
 	}
 
 	#[test]
 	fn introduced_array_of_variables() {
-		check_parser(
+		let (actual, names) = parse_with_names(
 			array_item,
+			"array [1..3] of var int: X_INTRODUCED_1_ ::var_is_introduced  = [x,y,z];",
+		);
+		assert_eq!(
+			actual,
 			(
-				"X_INTRODUCED_1_".to_owned(),
+				name_id(&names, "X_INTRODUCED_1_"),
 				Array {
 					contents: vec![
-						Literal::Identifier("x".to_owned()),
-						Literal::Identifier("y".to_owned()),
-						Literal::Identifier("z".to_owned()),
+						reference(&names, "x"),
+						reference(&names, "y"),
+						reference(&names, "z"),
 					],
 					ann: vec![],
 					defined: false,
@@ -815,97 +855,124 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 				},
 				false,
 			),
-			"array [1..3] of var int: X_INTRODUCED_1_ ::var_is_introduced  = [x,y,z];",
 		);
 	}
 
+	pub(crate) fn name_id(names: &NameStore<String>, expected: &str) -> NameId {
+		names
+			.iter()
+			.find_map(|(id, entry)| (entry.name.as_ref() == expected).then_some(id))
+			.unwrap_or_else(|| panic!("expected interned name `{expected}`"))
+	}
+
+	fn output_names<Identifier>(fzn: &FlatZinc<Identifier>) -> Vec<&str> {
+		fzn.output.iter().map(NamedRef::name).collect()
+	}
+
 	#[test]
-	fn output_array_annotation_is_promoted() {
-		check_parser(
-			array_item,
+	fn output_variable_annotation_is_promoted() {
+		let (actual, names) = parse_with_names(
+			variable_declaration,
+			"var int: x :: output_var :: var_is_introduced;",
+		);
+		assert_eq!(
+			actual,
 			(
-				"xs".to_owned(),
-				Array {
-					contents: vec![
-						Literal::Identifier("x".to_owned()),
-						Literal::Identifier("y".to_owned()),
-					],
+				name_id(&names, "x"),
+				Variable {
+					ty: Type::Int(None),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: true,
 				},
 				true,
 			),
-			"array [1..2] of var int: xs :: output_array([1..2]) :: var_is_introduced = [x, y];",
-		);
-
-		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
-			"array [1..2] of var int: xs :: output_array([1..2]) = [x, y];\nsolve satisfy;",
-		))
-		.expect("failed to parse output array model");
-		assert_eq!(fzn.output, vec!["xs".to_owned()]);
-	}
-
-	#[test]
-	fn output_variable_annotation_is_promoted() {
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
-				Variable {
-					ty: Type::Int(None),
-					ann: vec![],
-					defined: false,
-					introduced: true,
-				},
-				true,
-			)),
-			"var int: x :: output_var :: var_is_introduced;",
 		);
 
 		let fzn =
 			FlatZinc::<String>::from_fzn(Cursor::new("var int: x :: output_var;\nsolve satisfy;"))
 				.expect("failed to parse output variable model");
-		assert_eq!(fzn.output, vec!["x".to_owned()]);
+		assert_eq!(output_names(&fzn), vec!["x"]);
 	}
 
 	#[test]
-	fn parse_allows_block_comments() {
-		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
-			"/* leading block comment with ; inside */\nvar int: x;\nconstraint int_eq(x, x) /* inline block ; comment */;\nsolve satisfy;",
-		))
-		.expect("failed to parse model with block comments");
+	fn parameter_items_are_parsed() {
+		let (actual, names) = parse_with_names(parameter_item, "int: some_param = 5;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "some_param"),
+				Variable {
+					ty: Type::Int(None),
+					value: Some(Literal::Int(5)),
+					ann: vec![],
+					defined: false,
+					introduced: false,
+				},
+			),
+		);
 
-		assert!(fzn.variables.contains_key("x"));
+		let (actual, names) = parse_with_names(parameter_item, "bool: some_param = true;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "some_param"),
+				Variable {
+					ty: Type::Bool,
+					value: Some(Literal::Bool(true)),
+					ann: vec![],
+					defined: false,
+					introduced: false,
+				},
+			),
+		);
+
+		let (actual, names) = parse_with_names(parameter_item, "float: some_param = 35.3;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "some_param"),
+				Variable {
+					ty: Type::Float(None),
+					value: Some(Literal::Float(35.3)),
+					ann: vec![],
+					defined: false,
+					introduced: false,
+				},
+			),
+		);
+	}
+
+	#[test]
+	fn parse_allows_comments() {
+		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
+			"/* leading block comment with ; inside */\nvar int: x;\nconstraint int_eq(x, x) /* inline block ; comment */;\n% before solve\nsolve satisfy;",
+		))
+		.expect("failed to parse model with comments");
+
+		assert!(has_variable(&fzn, "x"));
 		assert_eq!(fzn.constraints.len(), 1);
-		assert_eq!(fzn.solve.method, Method::Satisfy);
+		assert_eq!(fzn.solve.method, crate::Method::Satisfy);
 	}
 
 	#[test]
-	fn parse_allows_percent_line_comments() {
-		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
-			"% model header\nvar int: x; % trailing declaration comment\n% before solve\nsolve satisfy;",
-		))
-		.expect("failed to parse model with line comments");
-
-		assert!(fzn.variables.contains_key("x"));
-		assert_eq!(fzn.solve.method, Method::Satisfy);
-	}
-
-	#[test]
-	fn parse_rejects_constraints_after_solve() {
+	fn parse_rejects_invalid_item_ordering() {
 		let error =
 			FlatZinc::<String>::from_fzn(Cursor::new("solve satisfy;\nconstraint int_eq(x, x);"))
 				.expect_err("expected parse to reject constraints after solve");
 		assert!(matches!(error, FznParseError::SyntaxError(_)));
-	}
 
-	#[test]
-	fn parse_rejects_declarations_after_constraints() {
 		let error = FlatZinc::<String>::from_fzn(Cursor::new(
 			"constraint int_eq(x, x);\nvar int: x;\nsolve satisfy;",
 		))
 		.expect_err("expected parse to reject declarations after constraints");
+		assert!(matches!(error, FznParseError::SyntaxError(_)));
+
+		let error = FlatZinc::<String>::from_fzn(Cursor::new(
+			"var int: x;\npredicate p(var int: y);\nsolve satisfy;",
+		))
+		.expect_err("expected parse to reject predicates after declarations");
 		assert!(matches!(error, FznParseError::SyntaxError(_)));
 	}
 
@@ -914,15 +981,6 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 		let error = FlatZinc::<String>::from_fzn(Cursor::new("solve satisfy;\nsolve minimize x;"))
 			.expect_err("expected parse to reject multiple solve items");
 		assert!(matches!(error, FznParseError::MultipleSolveItems));
-	}
-
-	#[test]
-	fn parse_rejects_predicates_after_declarations() {
-		let error = FlatZinc::<String>::from_fzn(Cursor::new(
-			"var int: x;\npredicate p(var int: y);\nsolve satisfy;",
-		))
-		.expect_err("expected parse to reject predicates after declarations");
-		assert!(matches!(error, FznParseError::SyntaxError(_)));
 	}
 
 	#[test]
@@ -940,10 +998,14 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 			}
 		}
 
-		let error = FlatZinc::<XIdentifier>::from_fzn(Cursor::new("var int: y;\nsolve satisfy;"))
-			.expect_err("expected parse to reject unsupported identifiers");
-
-		assert!(matches!(error, FznParseError::SyntaxError(_)));
+		let error = FlatZinc::<XIdentifier>::from_fzn(Cursor::new(
+			"var int: x;\nconstraint int_eq(x, x);\nsolve satisfy;",
+		))
+		.expect_err("expected parse to reject unsupported identifiers");
+		assert!(matches!(
+			error,
+			FznParseError::LinkError(LinkError::IdentifierError { .. })
+		));
 	}
 
 	#[test]
@@ -953,8 +1015,8 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 		))
 		.expect("failed to parse model with Ustr identifiers");
 
-		assert!(fzn.variables.contains_key(&Ustr::from("x")));
-		assert_eq!(fzn.output, vec![Ustr::from("x")]);
+		assert!(has_variable(&fzn, "x"));
+		assert_eq!(output_names(&fzn), vec!["x"]);
 		assert_eq!(fzn.constraints[0].id, Ustr::from("int_eq"));
 	}
 
@@ -969,407 +1031,464 @@ pub(super) fn check_parser<'s, P, O, E>(mut parser: P, expected: O, input: &'s s
 		)
 		.expect("failed to parse model with custom interner");
 
-		assert!(fzn.variables.contains_key(&Interned("id:x".to_owned())));
-		assert_eq!(fzn.output, vec![Interned("id:x".to_owned())]);
+		assert!(has_variable(&fzn, "x"));
+		assert_eq!(output_names(&fzn), vec!["x"]);
 		assert_eq!(fzn.constraints[0].id, Interned("id:int_eq".to_owned()));
 	}
 
-	#[test]
-	fn parse_supports_custom_map_types() {
-		type HashMapFzn =
-			FlatZinc<String, HashMap<String, Variable<String>>, HashMap<String, Array<String>>>;
+	pub(crate) fn parse_with_names<'s, P, O>(
+		mut parser: P,
+		input: &'s str,
+	) -> (O, NameStore<String>)
+	where
+		P: Parser<
+				Stream<'s, String, fn(&str) -> Result<String, Infallible>>,
+				O,
+				winnow::error::ContextError,
+			>,
+		O: Debug,
+	{
+		let interner: fn(&str) -> Result<String, Infallible> = |input| Ok(input.to_owned());
+		let mut stream = Stateful {
+			input,
+			state: ParserState::new(interner),
+		};
 
-		let fzn = HashMapFzn::from_fzn(Cursor::new(
-			"var int: x;\narray [1..2] of var int: xs = [x, x];\nsolve satisfy;",
-		))
-		.expect("failed to parse model into HashMap-backed maps");
-
-		assert!(fzn.variables.contains_key("x"));
-		assert!(fzn.arrays.contains_key("xs"));
+		let actual = parser
+			.parse_next(&mut stream)
+			.unwrap_or_else(|err| panic!("parser returned unexpected error: {err:?}"));
+		(actual, stream.state.names)
 	}
 
 	#[test]
 	fn predicate_items_are_parsed_but_ignored() {
-		check_parser(
+		let (actual, _) = parse_with_names(
 			predicate_item,
-			(),
 			"predicate array_int_minimum(var int: m,array [int] of var int: x);",
 		);
-		check_parser(
+		assert_eq!(actual, ());
+		let (actual, _) = parse_with_names(
 			predicate_item,
-			(),
 			"predicate my_float_set_in(var float: x,set of float: y);",
+		);
+		assert_eq!(actual, ());
+	}
+
+	fn reference(names: &NameStore<String>, name: &str) -> Literal {
+		Literal::Reference(name_id(names, name))
+	}
+
+	#[test]
+	fn solve_annotations_round_trip_to_public_ast() {
+		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
+			"var int: x;\nsolve :: int_search([x], input_order, indomain_min, complete) maximize x;",
+		))
+		.expect("failed to parse solve annotations");
+
+		assert_eq!(
+			fzn.solve.method,
+			crate::Method::Maximize(crate::Literal::Variable(Arc::clone(&fzn.variables[0])))
+		);
+		assert_eq!(
+			fzn.solve.ann,
+			vec![crate::Annotation::Call(crate::AnnotationCall {
+				id: "int_search".to_owned(),
+				args: vec![
+					crate::AnnotationArgument::Array(vec![crate::AnnotationLiteral::Variable(
+						Arc::downgrade(&fzn.variables[0]),
+					)]),
+					crate::AnnotationArgument::Literal(crate::AnnotationLiteral::Annotation(
+						crate::Annotation::Atom("input_order".to_owned()),
+					)),
+					crate::AnnotationArgument::Literal(crate::AnnotationLiteral::Annotation(
+						crate::Annotation::Atom("indomain_min".to_owned()),
+					)),
+					crate::AnnotationArgument::Literal(crate::AnnotationLiteral::Annotation(
+						crate::Annotation::Atom("complete".to_owned()),
+					)),
+				],
+			})]
 		);
 	}
 
 	#[test]
-	fn run_integration_tests() {
-		let flatzinc_file_prefix =
-			PathBuf::from(format!("{}/corpus/fzn/", env!("CARGO_MANIFEST_DIR")));
+	fn solve_items_are_parsed() {
+		let (actual, names) = parse_with_names(solve_objective, "solve minimize w;");
+		assert_eq!(
+			actual,
+			SolveObjective {
+				method: Method::Minimize(reference(&names, "w")),
+				ann: vec![],
+			},
+		);
 
-		let dir_iterator = flatzinc_file_prefix
-			.read_dir()
-			.expect("failed to iterate corpus");
-
-		for file in dir_iterator {
-			let file = file.expect("failed to read path from corpus iterator");
-
-			let fzn_file_path = file.path();
-			if fzn_file_path.extension().is_none_or(|ext| ext != "fzn") {
-				// Only read fzn files.
-				continue;
-			}
-
-			let fzn_file = File::open(file.path()).expect("failed to open FZN file");
-			let fzn_reader = BufReader::new(fzn_file);
-			let actual = match FlatZinc::<String>::from_fzn(fzn_reader) {
-				Ok(fzn) => fzn,
-				Err(error) => panic!(
-					"failed to parse file '{}': {}",
-					file.path().file_name().unwrap().display(),
-					error
-				),
-			};
-
-			let expected_path = file.path().with_extension("expected");
-			let expected = expect_test::expect_file![expected_path];
-
-			expected.assert_eq(&actual.to_string());
-		}
+		let (actual, names) = parse_with_names(
+			solve_objective,
+			"solve :: int_search([x, y, z], first_fail, indomain_split, complete) satisfy;",
+		);
+		assert_eq!(
+			actual,
+			SolveObjective {
+				method: Method::Satisfy,
+				ann: vec![Annotation::Call(AnnotationCall {
+					id: "int_search".to_owned(),
+					args: vec![
+						AnnotationArgument::Array(vec![
+							annotation_identifier(&names, "x"),
+							annotation_identifier(&names, "y"),
+							annotation_identifier(&names, "z"),
+						]),
+						AnnotationArgument::Literal(annotation_identifier(&names, "first_fail")),
+						AnnotationArgument::Literal(annotation_identifier(
+							&names,
+							"indomain_split",
+						)),
+						AnnotationArgument::Literal(annotation_identifier(&names, "complete")),
+					],
+				})],
+			},
+		);
 	}
 
 	#[test]
 	fn solve_optimize() {
-		check_parser(
-			solve_objective,
+		let (actual, names) = parse_with_names(solve_objective, "solve minimize w;");
+		assert_eq!(
+			actual,
 			SolveObjective {
-				method: Method::Minimize(Literal::Identifier("w".to_owned())),
+				method: Method::Minimize(reference(&names, "w")),
 				ann: vec![],
 			},
-			"solve minimize w;",
 		);
 
-		check_parser(
-			solve_objective,
+		let (actual, names) = parse_with_names(solve_objective, "solve maximize w;");
+		assert_eq!(
+			actual,
 			SolveObjective {
-				method: Method::Maximize(Literal::Identifier("w".to_owned())),
+				method: Method::Maximize(reference(&names, "w")),
 				ann: vec![],
 			},
-			"solve maximize w;",
 		);
 	}
 
 	#[test]
 	fn solve_satisfy() {
-		check_parser(
-			solve_objective,
+		let (actual, _) = parse_with_names(solve_objective, "solve satisfy;");
+		assert_eq!(
+			actual,
 			SolveObjective {
 				method: Method::Satisfy,
 				ann: vec![],
 			},
-			"solve satisfy;",
 		);
 	}
 
 	#[test]
 	fn solve_with_annotations() {
-		check_parser(
+		let (actual, names) = parse_with_names(
 			solve_objective,
+			"solve :: int_search(xs, input_order, indomain_min, complete) satisfy;",
+		);
+		assert_eq!(
+			actual,
 			SolveObjective {
 				method: Method::Satisfy,
 				ann: vec![Annotation::Call(AnnotationCall {
 					id: "int_search".to_owned(),
 					args: vec![
-						AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Identifier("xs".to_owned()),
-						)),
-						AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Identifier("input_order".to_owned()),
-						)),
-						AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Identifier("indomain_min".to_owned()),
-						)),
-						AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Identifier("complete".to_owned()),
-						)),
+						AnnotationArgument::Literal(annotation_identifier(&names, "xs",)),
+						AnnotationArgument::Literal(annotation_identifier(&names, "input_order",)),
+						AnnotationArgument::Literal(annotation_identifier(&names, "indomain_min",)),
+						AnnotationArgument::Literal(annotation_identifier(&names, "complete",)),
 					],
 				})],
 			},
-			"solve :: int_search(xs, input_order, indomain_min, complete) satisfy;",
 		);
 
-		check_parser(
+		let (actual, names) = parse_with_names(
 			solve_objective,
+			"solve :: int_search([x, y, z], first_fail, indomain_split, complete) maximize x;",
+		);
+		assert_eq!(
+			actual,
 			SolveObjective {
-				method: Method::Maximize(Literal::Identifier("x".to_owned())),
+				method: Method::Maximize(reference(&names, "x")),
 				ann: vec![Annotation::Call(AnnotationCall {
 					id: "int_search".to_owned(),
 					args: vec![
 						AnnotationArgument::Array(vec![
-							AnnotationLiteral::BaseLiteral(Literal::Identifier("x".to_owned())),
-							AnnotationLiteral::BaseLiteral(Literal::Identifier("y".to_owned())),
-							AnnotationLiteral::BaseLiteral(Literal::Identifier("z".to_owned())),
+							annotation_identifier(&names, "x"),
+							annotation_identifier(&names, "y"),
+							annotation_identifier(&names, "z"),
 						]),
-						AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Identifier("first_fail".to_owned()),
+						AnnotationArgument::Literal(annotation_identifier(&names, "first_fail",)),
+						AnnotationArgument::Literal(annotation_identifier(
+							&names,
+							"indomain_split",
 						)),
-						AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Identifier("indomain_split".to_owned()),
-						)),
-						AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(
-							Literal::Identifier("complete".to_owned()),
-						)),
+						AnnotationArgument::Literal(annotation_identifier(&names, "complete",)),
 					],
 				})],
 			},
-			"solve :: int_search([x, y, z], first_fail, indomain_split, complete) maximize x;",
 		);
 	}
 
 	#[test]
 	fn some_parameter_array_items() {
-		check_parser(
-			array_item,
+		let (actual, names) =
+			parse_with_names(array_item, "array [1..3] of int: some_param = [5, 3, 10];");
+		assert_eq!(
+			actual,
 			(
-				"some_param".to_owned(),
+				name_id(&names, "some_param"),
 				Array {
-					contents: vec![Literal::Int(5), Literal::Int(3), Literal::Int(10)],
+					contents: vec![Literal::Int(5), Literal::Int(3), Literal::Int(10),],
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
 			),
-			"array [1..3] of int: some_param = [5, 3, 10];",
 		);
-		check_parser(
-			array_item,
+
+		let (actual, names) =
+			parse_with_names(array_item, "array [1..2] of int: X_INTRODUCED_4_ = [-1,1];");
+		assert_eq!(
+			actual,
 			(
-				"X_INTRODUCED_4_".to_owned(),
+				name_id(&names, "X_INTRODUCED_4_"),
 				Array {
-					contents: vec![Literal::Int(-1), Literal::Int(1)],
+					contents: vec![Literal::Int(-1), Literal::Int(1),],
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
 			),
-			"array [1..2] of int: X_INTRODUCED_4_ = [-1,1];",
 		);
-	}
-
-	#[test]
-	fn some_parameter_items() {
-		check_parser(
-			parameter_item,
-			("some_param".to_owned(), Literal::Int(5)),
-			"int: some_param = 5;",
-		);
-		check_parser(
-			parameter_item,
-			("some_param".to_owned(), Literal::Bool(true)),
-			"bool: some_param = true;",
-		);
-		check_parser(
-			parameter_item,
-			("some_param".to_owned(), Literal::Float(35.3)),
-			"float: some_param = 35.3;",
-		);
-	}
-
-	fn string_interner_helper(s: &str) -> Result<String, Infallible> {
-		Ok(s.to_owned())
 	}
 
 	#[test]
 	fn variable_introduced_and_or_defined() {
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+		let (actual, names) =
+			parse_with_names(variable_declaration, "var int: x :: var_is_introduced;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(None),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: true,
 				},
 				false,
-			)),
-			"var int: x :: var_is_introduced;",
+			),
 		);
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+
+		let (actual, names) =
+			parse_with_names(variable_declaration, "var int: x :: is_defined_var;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(None),
+					value: None,
 					ann: vec![],
 					defined: true,
 					introduced: false,
 				},
 				false,
-			)),
-			"var int: x :: is_defined_var;",
+			),
 		);
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
-				Variable {
-					ty: Type::Bool,
-					ann: vec![],
-					defined: true,
-					introduced: true,
-				},
-				false,
-			)),
+
+		let (actual, names) = parse_with_names(
+			variable_declaration,
 			"var bool: x :: is_defined_var :: var_is_introduced;",
 		);
-	}
-
-	#[test]
-	fn variable_with_annotation() {
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
-					ty: Type::Int(None),
-					ann: vec![Annotation::Atom("mip".to_owned())],
-					defined: false,
-					introduced: false,
+					ty: Type::Bool,
+					value: None,
+					ann: vec![],
+					defined: true,
+					introduced: true,
 				},
 				false,
-			)),
-			"var int: x :: mip;",
+			),
 		);
 	}
 
 	#[test]
 	fn variable_with_bounded_float_domain() {
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+		let (actual, names) = parse_with_names(variable_declaration, "var 1.0..5.5: x;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
 					ty: Type::Float(Some(RangeList::from(1.0..=5.5))),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
-			)),
-			"var 1.0..5.5: x;",
+			),
 		);
 	}
 
 	#[test]
 	fn variable_with_bounded_int_domain() {
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+		let (actual, names) = parse_with_names(variable_declaration, "var 1..5: x;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(Some(RangeList::from(1..=5))),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
-			)),
-			"var 1..5: x;",
+			),
 		);
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+
+		let (actual, names) = parse_with_names(variable_declaration, "var {1, 4, 6}: x;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(Some(RangeList::from_iter([1..=1, 4..=4, 6..=6]))),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
-			)),
-			"var {1, 4, 6}: x;",
+			),
 		);
 	}
 
 	#[test]
 	fn variable_with_int_set_domain() {
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+		let (actual, names) = parse_with_names(variable_declaration, "var set of 1..5: x;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
 					ty: Type::IntSet(Some(RangeList::from(1..=5))),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
-			)),
-			"var set of 1..5: x;",
+			),
 		);
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+
+		let (actual, names) = parse_with_names(variable_declaration, "var set of {1, 3}: x;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
 					ty: Type::IntSet(Some(RangeList::from_iter([1..=1, 3..=3]))),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
-			)),
-			"var set of {1, 3}: x;",
+			),
 		);
 	}
 
 	#[test]
 	fn variable_with_named_domain() {
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+		let (actual, names) = parse_with_names(variable_declaration, "var int: x;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(None),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
-			)),
-			"var int: x;",
+			),
 		);
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+
+		let (actual, names) = parse_with_names(variable_declaration, "var float: x;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
 					ty: Type::Float(None),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
-			)),
-			"var float: x;",
+			),
 		);
-		check_parser(
-			variable,
-			Some((
-				"x".to_owned(),
+
+		let (actual, names) = parse_with_names(variable_declaration, "var set of int: x;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
 				Variable {
-					ty: Type::Bool,
+					ty: Type::IntSet(None),
+					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
 				},
 				false,
-			)),
-			"var bool: x;",
+			),
 		);
 	}
+
+	#[test]
+	fn variables_are_parsed_with_domains_and_annotations() {
+		let (actual, names) = parse_with_names(variable_declaration, "var 1..5: x :: mip;");
+		assert_eq!(
+			actual,
+			(
+				name_id(&names, "x"),
+				Variable {
+					ty: Type::Int(Some(RangeList::from(1..=5))),
+					value: None,
+					ann: vec![Annotation::Atom("mip".to_owned())],
+					defined: false,
+					introduced: false,
+				},
+				false,
+			),
+		);
+	}
+
+	test_file!(comments);
+	test_file!(documentation_example);
+	test_file!(empty_model);
+	test_file!(float);
+	test_file!(float_set);
+	test_file!(nested_search);
+	test_file!(predicates);
+	test_file!(set_var);
 }

@@ -1,16 +1,7 @@
 FlatZinc {
-    variables: {
-        u!("X_INTRODUCED_0_"): Variable {
-            ty: Int(
-                Some(
-                    RangeList::from(0..=85000),
-                ),
-            ),
-            ann: [],
-            defined: true,
-            introduced: false,
-        },
-        u!("b"): Variable {
+    variables: [
+        Variable {
+            name: "b",
             ty: Int(
                 Some(
                     RangeList::from(0..=3),
@@ -20,7 +11,8 @@ FlatZinc {
             defined: false,
             introduced: false,
         },
-        u!("c"): Variable {
+        Variable {
+            name: "c",
             ty: Int(
                 Some(
                     RangeList::from(0..=6),
@@ -30,9 +22,21 @@ FlatZinc {
             defined: false,
             introduced: false,
         },
-    },
-    arrays: {
-        u!("X_INTRODUCED_2_"): Array {
+        Variable {
+            name: "X_INTRODUCED_0_",
+            ty: Int(
+                Some(
+                    RangeList::from(0..=85000),
+                ),
+            ),
+            ann: [],
+            defined: true,
+            introduced: false,
+        },
+    ],
+    arrays: [
+        Array {
+            name: "X_INTRODUCED_2_",
             contents: [
                 Int(
                     250,
@@ -45,7 +49,8 @@ FlatZinc {
             defined: false,
             introduced: false,
         },
-        u!("X_INTRODUCED_6_"): Array {
+        Array {
+            name: "X_INTRODUCED_6_",
             contents: [
                 Int(
                     75,
@@ -58,7 +63,8 @@ FlatZinc {
             defined: false,
             introduced: false,
         },
-        u!("X_INTRODUCED_8_"): Array {
+        Array {
+            name: "X_INTRODUCED_8_",
             contents: [
                 Int(
                     100,
@@ -71,23 +77,54 @@ FlatZinc {
             defined: false,
             introduced: false,
         },
-    },
+    ],
     constraints: [
         Constraint {
             id: u!("int_lin_le"),
             args: [
-                Literal(
-                    Identifier(
-                        u!("X_INTRODUCED_2_"),
-                    ),
+                ArrayNamed(
+                    Array {
+                        name: "X_INTRODUCED_2_",
+                        contents: [
+                            Int(
+                                250,
+                            ),
+                            Int(
+                                200,
+                            ),
+                        ],
+                        ann: [],
+                        defined: false,
+                        introduced: false,
+                    },
                 ),
                 Array(
                     [
-                        Identifier(
-                            u!("b"),
+                        Variable(
+                            Variable {
+                                name: "b",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(0..=3),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
-                        Identifier(
-                            u!("c"),
+                        Variable(
+                            Variable {
+                                name: "c",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(0..=6),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
                     ],
                 ),
@@ -103,18 +140,49 @@ FlatZinc {
         Constraint {
             id: u!("int_lin_le"),
             args: [
-                Literal(
-                    Identifier(
-                        u!("X_INTRODUCED_6_"),
-                    ),
+                ArrayNamed(
+                    Array {
+                        name: "X_INTRODUCED_6_",
+                        contents: [
+                            Int(
+                                75,
+                            ),
+                            Int(
+                                150,
+                            ),
+                        ],
+                        ann: [],
+                        defined: false,
+                        introduced: false,
+                    },
                 ),
                 Array(
                     [
-                        Identifier(
-                            u!("b"),
+                        Variable(
+                            Variable {
+                                name: "b",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(0..=3),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
-                        Identifier(
-                            u!("c"),
+                        Variable(
+                            Variable {
+                                name: "c",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(0..=6),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
                     ],
                 ),
@@ -130,18 +198,49 @@ FlatZinc {
         Constraint {
             id: u!("int_lin_le"),
             args: [
-                Literal(
-                    Identifier(
-                        u!("X_INTRODUCED_8_"),
-                    ),
+                ArrayNamed(
+                    Array {
+                        name: "X_INTRODUCED_8_",
+                        contents: [
+                            Int(
+                                100,
+                            ),
+                            Int(
+                                150,
+                            ),
+                        ],
+                        ann: [],
+                        defined: false,
+                        introduced: false,
+                    },
                 ),
                 Array(
                     [
-                        Identifier(
-                            u!("b"),
+                        Variable(
+                            Variable {
+                                name: "b",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(0..=3),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
-                        Identifier(
-                            u!("c"),
+                        Variable(
+                            Variable {
+                                name: "c",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(0..=6),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
                     ],
                 ),
@@ -172,14 +271,44 @@ FlatZinc {
                 ),
                 Array(
                     [
-                        Identifier(
-                            u!("b"),
+                        Variable(
+                            Variable {
+                                name: "b",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(0..=3),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
-                        Identifier(
-                            u!("c"),
+                        Variable(
+                            Variable {
+                                name: "c",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(0..=6),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
-                        Identifier(
-                            u!("X_INTRODUCED_0_"),
+                        Variable(
+                            Variable {
+                                name: "X_INTRODUCED_0_",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(0..=85000),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: true,
+                                introduced: false,
+                            },
                         ),
                     ],
                 ),
@@ -190,7 +319,19 @@ FlatZinc {
                 ),
             ],
             defines: Some(
-                u!("X_INTRODUCED_0_"),
+                Variable(
+                    Variable {
+                        name: "X_INTRODUCED_0_",
+                        ty: Int(
+                            Some(
+                                RangeList::from(0..=85000),
+                            ),
+                        ),
+                        ann: [],
+                        defined: true,
+                        introduced: false,
+                    },
+                ),
             ),
             ann: [
                 Atom(
@@ -200,13 +341,47 @@ FlatZinc {
         },
     ],
     output: [
-        u!("b"),
-        u!("c"),
+        Variable(
+            Variable {
+                name: "b",
+                ty: Int(
+                    Some(
+                        RangeList::from(0..=3),
+                    ),
+                ),
+                ann: [],
+                defined: false,
+                introduced: false,
+            },
+        ),
+        Variable(
+            Variable {
+                name: "c",
+                ty: Int(
+                    Some(
+                        RangeList::from(0..=6),
+                    ),
+                ),
+                ann: [],
+                defined: false,
+                introduced: false,
+            },
+        ),
     ],
     solve: SolveObjective {
         method: Maximize(
-            Identifier(
-                u!("X_INTRODUCED_0_"),
+            Variable(
+                Variable {
+                    name: "X_INTRODUCED_0_",
+                    ty: Int(
+                        Some(
+                            RangeList::from(0..=85000),
+                        ),
+                    ),
+                    ann: [],
+                    defined: true,
+                    introduced: false,
+                },
             ),
         ),
         ann: [],

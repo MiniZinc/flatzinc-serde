@@ -14,15 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `FlatZinc` now has two additional (and optional) generic type parameters.
-  These allow the user to specify the type in which the mapping from identifier to variable and from identifier to array is stored.
-- [**breaking**] The `Annotation` variant of `AnnotationLiteral` now directly includes a value of type `AnnotationCall<Identifier>`, to avoid the ambiguity of identifier-annotations already being able to be represented using `BaseLiteral`.
 - [**breaking**] The `domain` field of `Variable` has now moved to a variant argument on `Type`, accessible through the `ty` attribute.
 - [**breaking**] The `objective` field of the `SolveMethod` struct has now moved to a variant argument on `Method`, accessible through the `method` attribute.
 - [**breaking**] Change the default implementation of `variables` and `arrays` field of `FlatZinc` to be `std::collections::HashMap`.
 - Allow the usage of stateful interners for `Identifier` using `FlatZinc::deserialize_with_interner` and `FlatZinc::from_fzn_with_interner`.
 - [**breaking**] Remove the `value` field from `Variable`.
   Any right-hand side value is now resolved during parsing.
+- [**breaking**] `FlatZinc` now uses `Arc<Variable>` and `Arc<Array>` to represent variable reference in `Literal`.
+  This allowed the removal of the `Argument` type, as inline arrays are now represented as `Array` types without names.
+	The `variables` and `arrays` attributes of `FlatZinc` are now `Vec<Arc<_>>`.
+	`AnnotationLiteral` now contains all its own variants, it no longer has a direct `Literal` variant.
+  This avoids strong references in annotations that might lead to self-referencing structures.
 
 ## [0.4.4] - 2025-11-06
 

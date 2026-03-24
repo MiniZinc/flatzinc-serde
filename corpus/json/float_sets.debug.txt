@@ -1,22 +1,7 @@
 FlatZinc {
-    variables: {
-        "a": Variable {
-            ty: Int(
-                Some(
-                    RangeList::from(1..=100),
-                ),
-            ),
-            ann: [],
-            defined: false,
-            introduced: false,
-        },
-        "c": Variable {
-            ty: Bool,
-            ann: [],
-            defined: true,
-            introduced: false,
-        },
-        "x": Variable {
+    variables: [
+        Variable {
+            name: "x",
             ty: Float(
                 Some(
                     RangeList::from(1.0..=100.0),
@@ -26,15 +11,43 @@ FlatZinc {
             defined: false,
             introduced: false,
         },
-    },
-    arrays: {},
+        Variable {
+            name: "a",
+            ty: Int(
+                Some(
+                    RangeList::from(1..=100),
+                ),
+            ),
+            ann: [],
+            defined: false,
+            introduced: false,
+        },
+        Variable {
+            name: "c",
+            ty: Bool,
+            ann: [],
+            defined: true,
+            introduced: false,
+        },
+    ],
+    arrays: [],
     constraints: [
         Constraint {
             id: "my_float_in",
             args: [
                 Literal(
-                    Identifier(
-                        "x",
+                    Variable(
+                        Variable {
+                            name: "x",
+                            ty: Float(
+                                Some(
+                                    RangeList::from(1.0..=100.0),
+                                ),
+                            ),
+                            ann: [],
+                            defined: false,
+                            introduced: false,
+                        },
                     ),
                 ),
                 Literal(
@@ -50,8 +63,18 @@ FlatZinc {
             id: "set_in_reif",
             args: [
                 Literal(
-                    Identifier(
-                        "a",
+                    Variable(
+                        Variable {
+                            name: "a",
+                            ty: Int(
+                                Some(
+                                    RangeList::from(1..=100),
+                                ),
+                            ),
+                            ann: [],
+                            defined: false,
+                            introduced: false,
+                        },
                     ),
                 ),
                 Literal(
@@ -60,21 +83,67 @@ FlatZinc {
                     ),
                 ),
                 Literal(
-                    Identifier(
-                        "c",
+                    Variable(
+                        Variable {
+                            name: "c",
+                            ty: Bool,
+                            ann: [],
+                            defined: true,
+                            introduced: false,
+                        },
                     ),
                 ),
             ],
             defines: Some(
-                "c",
+                Variable(
+                    Variable {
+                        name: "c",
+                        ty: Bool,
+                        ann: [],
+                        defined: true,
+                        introduced: false,
+                    },
+                ),
             ),
             ann: [],
         },
     ],
     output: [
-        "x",
-        "a",
-        "c",
+        Variable(
+            Variable {
+                name: "x",
+                ty: Float(
+                    Some(
+                        RangeList::from(1.0..=100.0),
+                    ),
+                ),
+                ann: [],
+                defined: false,
+                introduced: false,
+            },
+        ),
+        Variable(
+            Variable {
+                name: "a",
+                ty: Int(
+                    Some(
+                        RangeList::from(1..=100),
+                    ),
+                ),
+                ann: [],
+                defined: false,
+                introduced: false,
+            },
+        ),
+        Variable(
+            Variable {
+                name: "c",
+                ty: Bool,
+                ann: [],
+                defined: true,
+                introduced: false,
+            },
+        ),
     ],
     solve: SolveObjective {
         method: Satisfy,

@@ -1,40 +1,45 @@
 FlatZinc {
-    variables: {
-        "X_INTRODUCED_3_": Variable {
+    variables: [
+        Variable {
+            name: "x",
+            ty: Int(
+                Some(
+                    RangeList::from(1..=3),
+                ),
+            ),
+            ann: [],
+            defined: false,
+            introduced: false,
+        },
+        Variable {
+            name: "y",
+            ty: Int(
+                Some(
+                    RangeList::from(1..=3),
+                ),
+            ),
+            ann: [],
+            defined: false,
+            introduced: false,
+        },
+        Variable {
+            name: "b",
+            ty: Bool,
+            ann: [],
+            defined: true,
+            introduced: false,
+        },
+        Variable {
+            name: "X_INTRODUCED_3_",
             ty: Bool,
             ann: [],
             defined: true,
             introduced: true,
         },
-        "b": Variable {
-            ty: Bool,
-            ann: [],
-            defined: true,
-            introduced: false,
-        },
-        "x": Variable {
-            ty: Int(
-                Some(
-                    RangeList::from(1..=3),
-                ),
-            ),
-            ann: [],
-            defined: false,
-            introduced: false,
-        },
-        "y": Variable {
-            ty: Int(
-                Some(
-                    RangeList::from(1..=3),
-                ),
-            ),
-            ann: [],
-            defined: false,
-            introduced: false,
-        },
-    },
-    arrays: {
-        "X_INTRODUCED_0_": Array {
+    ],
+    arrays: [
+        Array {
+            name: "X_INTRODUCED_0_",
             contents: [
                 Int(
                     1,
@@ -47,7 +52,8 @@ FlatZinc {
             defined: false,
             introduced: false,
         },
-        "X_INTRODUCED_1_": Array {
+        Array {
+            name: "X_INTRODUCED_1_",
             contents: [
                 Int(
                     1,
@@ -60,45 +66,85 @@ FlatZinc {
             defined: false,
             introduced: false,
         },
-        "X_INTRODUCED_4_": Array {
+        Array {
+            name: "X_INTRODUCED_4_",
             contents: [
-                Identifier(
-                    "b",
+                Variable(
+                    Variable {
+                        name: "b",
+                        ty: Bool,
+                        ann: [],
+                        defined: true,
+                        introduced: false,
+                    },
                 ),
             ],
             ann: [],
             defined: false,
             introduced: false,
         },
-        "X_INTRODUCED_5_": Array {
+        Array {
+            name: "X_INTRODUCED_5_",
             contents: [
-                Identifier(
-                    "x",
+                Variable(
+                    Variable {
+                        name: "x",
+                        ty: Int(
+                            Some(
+                                RangeList::from(1..=3),
+                            ),
+                        ),
+                        ann: [],
+                        defined: false,
+                        introduced: false,
+                    },
                 ),
-                Identifier(
-                    "y",
+                Variable(
+                    Variable {
+                        name: "y",
+                        ty: Int(
+                            Some(
+                                RangeList::from(1..=3),
+                            ),
+                        ),
+                        ann: [],
+                        defined: false,
+                        introduced: false,
+                    },
                 ),
             ],
             ann: [],
             defined: false,
             introduced: false,
         },
-    },
+    ],
     constraints: [
         Constraint {
             id: "bool_clause",
             args: [
                 Array(
                     [
-                        Identifier(
-                            "X_INTRODUCED_3_",
+                        Variable(
+                            Variable {
+                                name: "X_INTRODUCED_3_",
+                                ty: Bool,
+                                ann: [],
+                                defined: true,
+                                introduced: true,
+                            },
                         ),
                     ],
                 ),
                 Array(
                     [
-                        Identifier(
-                            "b",
+                        Variable(
+                            Variable {
+                                name: "b",
+                                ty: Bool,
+                                ann: [],
+                                defined: true,
+                                introduced: false,
+                            },
                         ),
                     ],
                 ),
@@ -109,18 +155,49 @@ FlatZinc {
         Constraint {
             id: "int_lin_le_reif",
             args: [
-                Literal(
-                    Identifier(
-                        "X_INTRODUCED_0_",
-                    ),
+                ArrayNamed(
+                    Array {
+                        name: "X_INTRODUCED_0_",
+                        contents: [
+                            Int(
+                                1,
+                            ),
+                            Int(
+                                -1,
+                            ),
+                        ],
+                        ann: [],
+                        defined: false,
+                        introduced: false,
+                    },
                 ),
                 Array(
                     [
-                        Identifier(
-                            "x",
+                        Variable(
+                            Variable {
+                                name: "x",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(1..=3),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
-                        Identifier(
-                            "y",
+                        Variable(
+                            Variable {
+                                name: "y",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(1..=3),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
                     ],
                 ),
@@ -130,31 +207,76 @@ FlatZinc {
                     ),
                 ),
                 Literal(
-                    Identifier(
-                        "b",
+                    Variable(
+                        Variable {
+                            name: "b",
+                            ty: Bool,
+                            ann: [],
+                            defined: true,
+                            introduced: false,
+                        },
                     ),
                 ),
             ],
             defines: Some(
-                "b",
+                Variable(
+                    Variable {
+                        name: "b",
+                        ty: Bool,
+                        ann: [],
+                        defined: true,
+                        introduced: false,
+                    },
+                ),
             ),
             ann: [],
         },
         Constraint {
             id: "int_lin_le_reif",
             args: [
-                Literal(
-                    Identifier(
-                        "X_INTRODUCED_1_",
-                    ),
+                ArrayNamed(
+                    Array {
+                        name: "X_INTRODUCED_1_",
+                        contents: [
+                            Int(
+                                1,
+                            ),
+                            Int(
+                                1,
+                            ),
+                        ],
+                        ann: [],
+                        defined: false,
+                        introduced: false,
+                    },
                 ),
                 Array(
                     [
-                        Identifier(
-                            "x",
+                        Variable(
+                            Variable {
+                                name: "x",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(1..=3),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
-                        Identifier(
-                            "y",
+                        Variable(
+                            Variable {
+                                name: "y",
+                                ty: Int(
+                                    Some(
+                                        RangeList::from(1..=3),
+                                    ),
+                                ),
+                                ann: [],
+                                defined: false,
+                                introduced: false,
+                            },
                         ),
                     ],
                 ),
@@ -164,20 +286,58 @@ FlatZinc {
                     ),
                 ),
                 Literal(
-                    Identifier(
-                        "X_INTRODUCED_3_",
+                    Variable(
+                        Variable {
+                            name: "X_INTRODUCED_3_",
+                            ty: Bool,
+                            ann: [],
+                            defined: true,
+                            introduced: true,
+                        },
                     ),
                 ),
             ],
             defines: Some(
-                "X_INTRODUCED_3_",
+                Variable(
+                    Variable {
+                        name: "X_INTRODUCED_3_",
+                        ty: Bool,
+                        ann: [],
+                        defined: true,
+                        introduced: true,
+                    },
+                ),
             ),
             ann: [],
         },
     ],
     output: [
-        "x",
-        "y",
+        Variable(
+            Variable {
+                name: "x",
+                ty: Int(
+                    Some(
+                        RangeList::from(1..=3),
+                    ),
+                ),
+                ann: [],
+                defined: false,
+                introduced: false,
+            },
+        ),
+        Variable(
+            Variable {
+                name: "y",
+                ty: Int(
+                    Some(
+                        RangeList::from(1..=3),
+                    ),
+                ),
+                ann: [],
+                defined: false,
+                introduced: false,
+            },
+        ),
     ],
     solve: SolveObjective {
         method: Satisfy,
@@ -189,74 +349,70 @@ FlatZinc {
                         Array(
                             [
                                 Annotation(
-                                    AnnotationCall {
-                                        id: "int_search",
-                                        args: [
-                                            Literal(
-                                                BaseLiteral(
-                                                    Identifier(
-                                                        "X_INTRODUCED_5_",
+                                    Call(
+                                        AnnotationCall {
+                                            id: "int_search",
+                                            args: [
+                                                ArrayNamed(
+                                                    (Weak),
+                                                ),
+                                                Literal(
+                                                    Annotation(
+                                                        Atom(
+                                                            "input_order",
+                                                        ),
                                                     ),
                                                 ),
-                                            ),
-                                            Literal(
-                                                BaseLiteral(
-                                                    Identifier(
-                                                        "input_order",
+                                                Literal(
+                                                    Annotation(
+                                                        Atom(
+                                                            "indomain_min",
+                                                        ),
                                                     ),
                                                 ),
-                                            ),
-                                            Literal(
-                                                BaseLiteral(
-                                                    Identifier(
-                                                        "indomain_min",
+                                                Literal(
+                                                    Annotation(
+                                                        Atom(
+                                                            "complete",
+                                                        ),
                                                     ),
                                                 ),
-                                            ),
-                                            Literal(
-                                                BaseLiteral(
-                                                    Identifier(
-                                                        "complete",
-                                                    ),
-                                                ),
-                                            ),
-                                        ],
-                                    },
+                                            ],
+                                        },
+                                    ),
                                 ),
                                 Annotation(
-                                    AnnotationCall {
-                                        id: "bool_search",
-                                        args: [
-                                            Literal(
-                                                BaseLiteral(
-                                                    Identifier(
-                                                        "X_INTRODUCED_4_",
+                                    Call(
+                                        AnnotationCall {
+                                            id: "bool_search",
+                                            args: [
+                                                ArrayNamed(
+                                                    (Weak),
+                                                ),
+                                                Literal(
+                                                    Annotation(
+                                                        Atom(
+                                                            "input_order",
+                                                        ),
                                                     ),
                                                 ),
-                                            ),
-                                            Literal(
-                                                BaseLiteral(
-                                                    Identifier(
-                                                        "input_order",
+                                                Literal(
+                                                    Annotation(
+                                                        Atom(
+                                                            "indomain_min",
+                                                        ),
                                                     ),
                                                 ),
-                                            ),
-                                            Literal(
-                                                BaseLiteral(
-                                                    Identifier(
-                                                        "indomain_min",
+                                                Literal(
+                                                    Annotation(
+                                                        Atom(
+                                                            "complete",
+                                                        ),
                                                     ),
                                                 ),
-                                            ),
-                                            Literal(
-                                                BaseLiteral(
-                                                    Identifier(
-                                                        "complete",
-                                                    ),
-                                                ),
-                                            ),
-                                        ],
-                                    },
+                                            ],
+                                        },
+                                    ),
                                 ),
                             ],
                         ),

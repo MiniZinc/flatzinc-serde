@@ -4,19 +4,16 @@
 pub(crate) mod seeded;
 
 use std::{
-	borrow::Cow,
-	fmt::{self, Debug, Display, Formatter},
-	marker::PhantomData,
+	fmt::{Debug, Display},
+	ops::Deref,
+	sync::{Arc, Weak},
 };
 
-use serde::{
-	Deserialize, Deserializer, Serialize, Serializer,
-	de::{MapAccess, Visitor},
-	ser::SerializeMap,
-};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
-	Annotation, Array, FlatZinc, Literal, Method, RangeList, SolveObjective, Type, Variable,
+	Annotation, Array, FlatZinc, Literal, Method, NamedRef, RangeList, SolveObjective, Type,
+	Variable,
 };
 
 /// Base variable type used for the `"type"` field in FlatZinc JSON.
@@ -40,22 +37,6 @@ pub(crate) enum BaseType {
 	IntSet,
 }
 
-/// Encapsulated set helper struct
-#[derive(Deserialize, Serialize)]
-#[serde(rename = "set")]
-struct SetLiteral<E: PartialOrd> {
-	/// Range list used to represent the content of the set.
-	set: Vec<(E, E)>,
-}
-
-/// Encapsulated String helper struct
-#[derive(Deserialize, Serialize)]
-#[serde(rename = "string")]
-struct StringLiteral {
-	/// Content of the string literal.
-	string: String,
-}
-
 /// Domain payload used for the optional `"domain"` field in FlatZinc JSON.
 ///
 /// This is kept separate from [`BaseType`] so [`crate::Variable`] can preserve
@@ -70,104 +51,6 @@ pub(crate) enum VariableDomain {
 	/// bounds.
 	#[serde(deserialize_with = "deserialize_set", serialize_with = "serialize_set")]
 	Float(RangeList<f64>),
-}
-
-/// Deserialization function to resolve the encapsulation of set literals in the
-/// FlatZinc serialization format
-pub(crate) fn deserialize_encapsulated_set<
-	'de,
-	D: Deserializer<'de>,
-	E: Copy + Deserialize<'de> + PartialOrd + 'static,
->(
-	deserializer: D,
-) -> Result<RangeList<E>, D::Error> {
-	let s: SetLiteral<E> = Deserialize::deserialize(deserializer)?;
-	let range = s.set.into_iter().map(|(a, b)| a..=b).collect();
-	Ok(range)
-}
-/// Deserialization function to resolve the encapsulation of string literals in
-/// the FlatZinc serialization format
-pub(crate) fn deserialize_encapsulated_string<'de, D: Deserializer<'de>>(
-	deserializer: D,
-) -> Result<String, D::Error> {
-	let s: StringLiteral = Deserialize::deserialize(deserializer)?;
-	Ok(s.string)
-}
-
-/// Deserialization function for object-like fields that can collect `(K, V)`
-/// pairs into arbitrary map-like containers (e.g. `BTreeMap`, `HashMap`,
-/// `Vec<(K, V)>`).
-pub(crate) fn deserialize_key_value_object<'de, D, M, K, V>(deserializer: D) -> Result<M, D::Error>
-where
-	D: Deserializer<'de>,
-	M: FromIterator<(K, V)>,
-	K: Deserialize<'de>,
-	V: Deserialize<'de>,
-{
-	struct MapAccessIter<'de, 'a, A, K, V>
-	where
-		A: MapAccess<'de>,
-	{
-		map: &'a mut A,
-		phantom: PhantomData<(&'de (), K, V)>,
-	}
-
-	impl<'de, 'a, A, K, V> MapAccessIter<'de, 'a, A, K, V>
-	where
-		A: MapAccess<'de>,
-	{
-		/// Create an iterator wrapper over a serde map access object.
-		fn new(map: &'a mut A) -> Self {
-			Self {
-				map,
-				phantom: PhantomData,
-			}
-		}
-	}
-
-	impl<'de, A, K, V> Iterator for MapAccessIter<'de, '_, A, K, V>
-	where
-		A: MapAccess<'de>,
-		K: Deserialize<'de>,
-		V: Deserialize<'de>,
-	{
-		type Item = Result<(K, V), A::Error>;
-
-		fn next(&mut self) -> Option<Self::Item> {
-			self.map.next_entry().transpose()
-		}
-
-		fn size_hint(&self) -> (usize, Option<usize>) {
-			match self.map.size_hint() {
-				Some(n) => (n, Some(n)),
-				None => (0, None),
-			}
-		}
-	}
-
-	struct KeyValueObjectVisitor<M, K, V>(PhantomData<(M, K, V)>);
-
-	impl<'de, M, K, V> Visitor<'de> for KeyValueObjectVisitor<M, K, V>
-	where
-		M: FromIterator<(K, V)>,
-		K: Deserialize<'de>,
-		V: Deserialize<'de>,
-	{
-		type Value = M;
-
-		fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-			formatter.write_str("a JSON object")
-		}
-
-		fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-		where
-			A: MapAccess<'de>,
-		{
-			MapAccessIter::<A, K, V>::new(&mut map).collect()
-		}
-	}
-
-	deserializer.deserialize_map(KeyValueObjectVisitor(PhantomData))
 }
 
 /// Deserialize a raw `(start, end)` range list into a [`RangeList`].
@@ -188,12 +71,51 @@ pub(crate) fn is_false(b: &bool) -> bool {
 	!(*b)
 }
 
+/// Serialize an [`Arc<Array>`] by serializing its name, if present, or its
+/// contents otherwise.
+pub(crate) fn serialize_array_arc<S: Serializer, Identifier>(
+	array: &Arc<Array<Identifier>>,
+	serializer: S,
+) -> Result<S::Ok, S::Error> {
+	Serialize::serialize(&array.name, serializer)
+}
+
+/// Serialize a slice of [`Arc<Array>`] references into a key-value map, using
+/// the array name as the key.
+pub(crate) fn serialize_array_map<S: Serializer, Identifier: Serialize>(
+	arrays: &[Arc<Array<Identifier>>],
+	serializer: S,
+) -> Result<S::Ok, S::Error> {
+	let mut state = serializer.serialize_map(Some(arrays.len()))?;
+	for arr in arrays {
+		state.serialize_entry(&arr.name, arr.deref())?;
+	}
+	state.end()
+}
+
+/// Serialize a [`Weak<Array>`] reference, upgrading it to an [`Arc<Array>`]
+/// before serializing it using its name, if present, or its contents otherwise.
+pub(crate) fn serialize_array_weak<S: Serializer, Identifier>(
+	array: &Weak<Array<Identifier>>,
+	serializer: S,
+) -> Result<S::Ok, S::Error> {
+	let array = array.upgrade().ok_or_else(|| {
+		serde::ser::Error::custom("dangling weak array reference in annotation literal")
+	})?;
+	serialize_array_arc(&array, serializer)
+}
+
 /// Serialization function to be used for the encapsulation of set literals
 /// required by the FlatZinc serialization format
 pub(crate) fn serialize_encapsulate_set<E: PartialOrd + Serialize + Copy, S: Serializer>(
 	r: &RangeList<E>,
 	serializer: S,
 ) -> Result<S::Ok, S::Error> {
+	#[derive(Serialize)]
+	struct SetLiteral<E: PartialOrd> {
+		set: Vec<(E, E)>,
+	}
+
 	Serialize::serialize(
 		&SetLiteral {
 			set: r.iter().map(|r| (*r.start(), *r.end())).collect(),
@@ -208,31 +130,12 @@ pub(crate) fn serialize_encapsulate_string<S: Serializer>(
 	s: &str,
 	serializer: S,
 ) -> Result<S::Ok, S::Error> {
-	Serialize::serialize(
-		&StringLiteral {
-			string: String::from(s),
-		},
-		serializer,
-	)
-}
-
-/// Serialization function for map-like containers represented as iterables of
-/// key-value pairs.
-pub(crate) fn serialize_key_value_object<'a, S, M, K, V>(
-	map_like: &'a M,
-	serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-	S: Serializer,
-	&'a M: IntoIterator<Item = (&'a K, &'a V)>,
-	K: Serialize + 'a,
-	V: Serialize + 'a,
-{
-	let mut ser_map = serializer.serialize_map(None)?;
-	for (key, value) in map_like {
-		ser_map.serialize_entry(key, value)?;
+	#[derive(Serialize)]
+	struct StringLiteral<'a> {
+		string: &'a str,
 	}
-	ser_map.end()
+
+	Serialize::serialize(&StringLiteral { string: s }, serializer)
 }
 
 /// Serialization function to be used for the encapsulation of set literals
@@ -245,79 +148,66 @@ pub(crate) fn serialize_set<E: PartialOrd + Serialize + Copy, S: Serializer>(
 	Serialize::serialize(&x, serializer)
 }
 
-impl<'de, I, VM, AM, E> Deserialize<'de> for FlatZinc<I, VM, AM>
+/// Serialize an [`Arc<Variable>`] by serializing its name.
+pub(crate) fn serialize_variable_arc<S: Serializer, Identifier>(
+	variable: &Arc<Variable<Identifier>>,
+	serializer: S,
+) -> Result<S::Ok, S::Error> {
+	Serialize::serialize(&variable.name, serializer)
+}
+
+/// Serialize a slice of variables into a key-value map, using the variable
+/// name as the key.
+pub(crate) fn serialize_variable_map<S: Serializer, Identifier: Serialize>(
+	variables: &[Arc<Variable<Identifier>>],
+	serializer: S,
+) -> Result<S::Ok, S::Error> {
+	let mut state = serializer.serialize_map(Some(variables.len()))?;
+	for var in variables {
+		state.serialize_entry(&var.name, var.deref())?;
+	}
+	state.end()
+}
+
+/// Serialize a [`Weak<Variable>`] reference, upgrading it to an
+/// [`Arc<Variable>`] before serializing it using its name.
+pub(crate) fn serialize_variable_weak<S: Serializer, Identifier>(
+	variable: &Weak<Variable<Identifier>>,
+	serializer: S,
+) -> Result<S::Ok, S::Error> {
+	let variable = variable.upgrade().ok_or_else(|| {
+		serde::ser::Error::custom("dangling weak variable reference in annotation literal")
+	})?;
+	serialize_variable_arc(&variable, serializer)
+}
+
+impl<'de, I, E> Deserialize<'de> for FlatZinc<I>
 where
-	I: Clone + Debug + TryFrom<Cow<'de, str>, Error = E>,
+	I: Clone + Debug + for<'a> TryFrom<&'a str, Error = E>,
 	E: Display,
-	VM: FromIterator<(I, Variable<I>)>,
-	AM: FromIterator<(I, Array<I>)>,
 {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
 		D: Deserializer<'de>,
 	{
-		Self::deserialize_with_interner(deserializer, I::try_from)
+		Self::deserialize_with_interner(deserializer, |ident| I::try_from(ident))
 	}
 }
 
-impl<'de, Identifier: Deserialize<'de>> Deserialize<'de> for SolveObjective<Identifier> {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		#[derive(Deserialize)]
-		#[serde(rename = "solve")]
-		#[serde(bound(deserialize = "Identifier: Deserialize<'de>"))]
-		struct SolveObjectiveRepr<Identifier> {
-			#[serde(rename = "method")]
-			method: String,
-			#[serde(default)]
-			objective: Option<Literal<Identifier>>,
-			#[serde(default, skip_serializing_if = "Vec::is_empty")]
-			ann: Vec<Annotation<Identifier>>,
-		}
-
-		let repr = SolveObjectiveRepr::deserialize(deserializer)?;
-		let method = match (repr.method.as_str(), repr.objective) {
-			("satisfy", None) => Method::Satisfy,
-			("satisfy", Some(_)) => {
-				return Err(<D::Error as ::serde::de::Error>::custom(
-					"satisfy solve items cannot have an objective",
-				));
-			}
-			("minimize", Some(objective)) => Method::Minimize(objective),
-			("minimize", None) => {
-				return Err(<D::Error as ::serde::de::Error>::custom(
-					"minimize solve items require an objective",
-				));
-			}
-			("maximize", Some(objective)) => Method::Maximize(objective),
-			("maximize", None) => {
-				return Err(<D::Error as ::serde::de::Error>::custom(
-					"maximize solve items require an objective",
-				));
-			}
-			(method, _) => {
-				return Err(<D::Error as ::serde::de::Error>::custom(format!(
-					"unknown solve method '{method}'",
-				)));
-			}
-		};
-
-		Ok(SolveObjective {
-			method,
-			ann: repr.ann,
-		})
+impl<Identifier: Serialize> Serialize for NamedRef<Identifier> {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		self.name().serialize(serializer)
 	}
 }
 
 impl<Identifier: Serialize> Serialize for SolveObjective<Identifier> {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		#[derive(Serialize)]
-		#[serde(rename = "solve")]
 		struct SolveObjectiveRepr<'a, Identifier> {
-			#[serde(rename = "method")]
 			method: &'static str,
 			#[serde(skip_serializing_if = "Option::is_none")]
 			objective: Option<&'a Literal<Identifier>>,
-			#[serde(default, skip_serializing_if = "Vec::is_empty")]
+			#[serde(skip_serializing_if = "Vec::is_empty")]
 			ann: &'a Vec<Annotation<Identifier>>,
 		}
 
@@ -336,36 +226,18 @@ impl<Identifier: Serialize> Serialize for SolveObjective<Identifier> {
 	}
 }
 
-impl<'de, Identifier: Deserialize<'de>> Deserialize<'de> for Variable<Identifier> {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		let variable = seeded::VariableValue::deserialize(deserializer)?;
-		if variable.value.is_some() {
-			return Err(<D::Error as ::serde::de::Error>::custom(
-				"`Variable` does not accept an `rhs` field; deserialize `FlatZinc` instead to resolve aliases",
-			));
-		}
-		Ok(variable.into_variable())
-	}
-}
-
 impl<Identifier: Serialize> Serialize for Variable<Identifier> {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		#[derive(Serialize)]
-		#[serde(rename = "variable")]
 		struct VariableRepr<'a, Identifier> {
-			/// Base type stored in the JSON `"type"` field.
 			#[serde(rename = "type")]
 			ty: BaseType,
-			/// Optional domain stored in the JSON `"domain"` field.
 			#[serde(skip_serializing_if = "Option::is_none")]
 			domain: Option<VariableDomain>,
-			/// Variable annotations stored in the JSON `"ann"` field.
 			#[serde(default, skip_serializing_if = "Vec::is_empty")]
 			ann: &'a Vec<Annotation<Identifier>>,
-			/// Whether the variable is solver-defined.
 			#[serde(default, skip_serializing_if = "is_false")]
 			defined: bool,
-			/// Whether the variable was introduced during MiniZinc lowering.
 			#[serde(default, skip_serializing_if = "is_false")]
 			introduced: bool,
 		}
@@ -406,50 +278,41 @@ mod tests {
 	}
 
 	use std::{
-		collections::{BTreeMap, HashMap},
 		convert::Infallible,
 		fs::File,
 		io::{BufReader, Read},
 		path::Path,
+		sync::Arc,
 	};
 
 	use expect_test::ExpectFile;
 	use rangelist::RangeList;
-	use serde_json::Deserializer;
+	use serde_json::{Deserializer, json};
 	use ustr::Ustr;
 
 	use crate::{
 		Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Argument, Array,
-		FlatZinc, Literal, Method, SolveObjective, Type, Variable,
+		FlatZinc, Literal, Method, NamedRef, SolveObjective, Type, Variable,
 	};
 
+	fn find_array<'a, Identifier>(
+		fzn: &'a FlatZinc<Identifier>,
+		name: &str,
+	) -> &'a Arc<Array<Identifier>> {
+		fzn.arrays
+			.iter()
+			.find(|array| array.name == name)
+			.unwrap_or_else(|| panic!("missing array `{name}`"))
+	}
+
 	#[test]
-	fn test_default_with_custom_map_types() {
-		let fzn = FlatZinc::<
-			String,
-			HashMap<String, Variable<String>>,
-			Vec<(String, Array<String>)>,
-		>::default();
+	fn test_default_flatzinc() {
+		let fzn = FlatZinc::<String>::default();
 		assert!(fzn.variables.is_empty());
 		assert!(fzn.arrays.is_empty());
 		assert!(fzn.constraints.is_empty());
 		assert!(fzn.output.is_empty());
 		assert_eq!(fzn.version, "1.0");
-	}
-
-	#[test]
-	fn test_deserialize_variable_rejects_rhs() {
-		let err = serde_json::from_str::<Variable<String>>(
-			r#"{
-			"type": "int",
-			"rhs": 5,
-			"ann": ["foo"],
-			"introduced": true
-		}"#,
-		)
-		.unwrap_err();
-
-		assert!(err.to_string().contains("does not accept an `rhs` field"));
 	}
 
 	#[test]
@@ -475,11 +338,19 @@ mod tests {
 		})
 		.unwrap();
 
-		assert_eq!(fzn.output, vec![Interned("intern:x".to_owned())]);
-		assert_eq!(fzn.constraints[0].id, Interned("intern:int_eq".to_owned()));
 		assert_eq!(
-			fzn.constraints[0].args[0],
-			Argument::Literal(Literal::Identifier(Interned("intern:x".to_owned())))
+			fzn.output.iter().map(NamedRef::name).collect::<Vec<_>>(),
+			vec!["x"]
+		);
+		assert_eq!(fzn.constraints[0].id, Interned("intern:int_eq".to_owned()));
+		assert_eq!(fzn.variables.len(), 1);
+		let Argument::Literal(Literal::Variable(variable)) = &fzn.constraints[0].args[0] else {
+			unreachable!()
+		};
+		assert!(Arc::ptr_eq(variable, &fzn.variables[0]));
+		assert_eq!(
+			fzn.constraints[0].args[1],
+			Argument::Literal(Literal::Int(1))
 		);
 	}
 
@@ -504,14 +375,15 @@ mod tests {
 			.unwrap();
 
 		assert_eq!(fzn.variables.len(), 1);
-		assert!(!fzn.variables.contains_key("y"));
+		assert!(fzn.variables.iter().all(|variable| variable.name != "y"));
 		assert_eq!(
-			fzn.constraints[0].args,
-			vec![
-				Argument::Literal(Literal::Int(5)),
-				Argument::Literal(Literal::Identifier("x".to_owned())),
-			]
+			fzn.constraints[0].args[0],
+			Argument::Literal(Literal::Int(5))
 		);
+		let Argument::Literal(Literal::Variable(variable)) = &fzn.constraints[0].args[1] else {
+			unreachable!()
+		};
+		assert_eq!(variable.name, "x");
 	}
 
 	#[test]
@@ -523,7 +395,7 @@ mod tests {
 			"arrays": {
 				"ys": {"a": ["y", 1]}
 			},
-			"output": ["y", "x"],
+			"output": ["ys", "x"],
 			"solve": {"method": "satisfy"},
 			"variables": {
 				"y": {"type": "int", "rhs": 5},
@@ -538,38 +410,21 @@ mod tests {
 			})
 			.unwrap();
 
+		let ys = find_array(&fzn, "ys");
+		assert_eq!(ys.contents, vec![Literal::Int(5), Literal::Int(1)]);
 		assert_eq!(
-			fzn.arrays["ys"].contents,
-			vec![Literal::Int(5), Literal::Int(1)]
+			fzn.constraints[0].args[0],
+			Argument::Literal(Literal::Int(5))
 		);
-		assert_eq!(
-			fzn.constraints[0].args,
-			vec![
-				Argument::Literal(Literal::Int(5)),
-				Argument::Literal(Literal::Identifier("x".to_owned())),
-			]
-		);
-		assert_eq!(fzn.output, vec!["y".to_owned(), "x".to_owned()]);
-	}
 
-	#[test]
-	fn test_hashmap_backed_maps_deserialize() {
-		type HashMapFlatZinc =
-			FlatZinc<String, HashMap<String, Variable<String>>, HashMap<String, Array<String>>>;
-
-		let mut rdr = BufReader::new(
-			File::open(Path::new("./corpus/json/documentation_example.fzn.json")).unwrap(),
-		);
-		let mut content = String::new();
-		let _ = rdr.read_to_string(&mut content).unwrap();
-
-		let fzn: HashMapFlatZinc = serde_json::from_str(&content).unwrap();
-
-		let fzn2: HashMapFlatZinc = {
-			let json = serde_json::to_string(&fzn).unwrap();
-			serde_json::from_str(&json).unwrap()
+		let Argument::Literal(Literal::Variable(variable)) = &fzn.constraints[0].args[1] else {
+			unreachable!()
 		};
-		assert_eq!(fzn, fzn2);
+		assert_eq!(variable.name, "x");
+		assert_eq!(
+			fzn.output.iter().map(NamedRef::name).collect::<Vec<_>>(),
+			vec!["ys", "x"]
+		);
 	}
 
 	#[test]
@@ -580,6 +435,55 @@ mod tests {
 		let fzn: FlatZinc<Ustr> = serde_json::from_reader(rdr).unwrap();
 		expect_test::expect_file!["../corpus/json/documentation_example.debug_ustr.txt"]
 			.assert_debug_eq(&fzn)
+	}
+
+	#[test]
+	fn test_json_shape_preserves_named_objects() {
+		let x = Arc::new(Variable::<String> {
+			name: "x".to_owned(),
+			ty: Type::Int(None),
+			ann: vec![],
+			defined: false,
+			introduced: false,
+		});
+		let y = Arc::new(Array::<String> {
+			name: "y".to_owned(),
+			contents: vec![Literal::Int(1), Literal::Variable(Arc::clone(&x))],
+			ann: vec![],
+			defined: false,
+			introduced: false,
+		});
+		let fzn = FlatZinc {
+			variables: vec![Arc::clone(&x)],
+			arrays: vec![Arc::clone(&y)],
+			constraints: vec![],
+			output: vec![
+				NamedRef::Variable(Arc::clone(&x)),
+				NamedRef::Array(Arc::clone(&y)),
+			],
+			solve: SolveObjective {
+				method: Method::Satisfy,
+				ann: vec![],
+			},
+			version: "1.0".to_owned(),
+		};
+
+		let value = serde_json::to_value(&fzn).unwrap();
+		assert_eq!(
+			value,
+			json!({
+				"variables": {
+					"x": {"type": "int"}
+				},
+				"arrays": {
+					"y": {"a": [1, "x"]}
+				},
+				"constraints": [],
+				"output": ["x", "y"],
+				"solve": {"method": "satisfy"},
+				"version": "1.0"
+			})
+		);
 	}
 
 	#[test]
@@ -597,15 +501,15 @@ mod tests {
 		let ann: Annotation<&str> = Annotation::Call(AnnotationCall {
 			id: "bool_search",
 			args: vec![
-				AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(Literal::Identifier(
+				AnnotationArgument::Literal(AnnotationLiteral::Annotation(Annotation::Atom(
 					"input_order",
 				))),
-				AnnotationArgument::Literal(AnnotationLiteral::BaseLiteral(Literal::Identifier(
+				AnnotationArgument::Literal(AnnotationLiteral::Annotation(Annotation::Atom(
 					"indomain_min",
 				))),
 			],
 		});
-		assert_eq!(ann.to_string(), "::bool_search(input_order, indomain_min)");
+		assert_eq!(ann.to_string(), "bool_search(input_order, indomain_min)");
 
 		let ty = Type::Bool;
 		assert_eq!(ty.to_string(), "bool");
@@ -622,7 +526,14 @@ mod tests {
 		assert_eq!(lit.to_string(), "1");
 		let lit = Literal::<&str>::Float(1.0);
 		assert_eq!(lit.to_string(), "1.0");
-		let lit = Literal::<&str>::Identifier("x");
+		let x = Arc::new(Variable {
+			name: "x".to_owned(),
+			ty: Type::IntSet(None),
+			ann: vec![Annotation::Atom("special")],
+			defined: false,
+			introduced: true,
+		});
+		let lit = Literal::Variable(Arc::clone(&x));
 		assert_eq!(lit.to_string(), "x");
 		let lit = Literal::<&str>::Bool(true);
 		assert_eq!(lit.to_string(), "true");
@@ -633,26 +544,17 @@ mod tests {
 		let lit = Literal::<&str>::String(String::from("hello"));
 		assert_eq!(lit.to_string(), "\"hello\"");
 
+		let y = Arc::new(Array {
+			name: "y".to_owned(),
+			ann: vec![Annotation::Atom("special")],
+			contents: vec![Literal::Int(1), Literal::Int(2), Literal::Int(3)],
+			introduced: true,
+			defined: true,
+		});
 		let fzn = FlatZinc {
-			variables: BTreeMap::from([(
-				"x",
-				Variable {
-					ty: Type::IntSet(None),
-					ann: vec![Annotation::Atom("special")],
-					defined: false,
-					introduced: true,
-				},
-			)]),
-			arrays: BTreeMap::from([(
-				"y",
-				Array {
-					ann: vec![Annotation::Atom("special")],
-					contents: vec![Literal::Int(1), Literal::Int(2), Literal::Int(3)],
-					introduced: true,
-					defined: true,
-				},
-			)]),
-			output: vec!["y"],
+			variables: vec![Arc::clone(&x)],
+			arrays: vec![Arc::clone(&y)],
+			output: vec![NamedRef::Array(Arc::clone(&y))],
 			..Default::default()
 		};
 		assert_eq!(
@@ -661,7 +563,7 @@ mod tests {
 		);
 
 		let sat = SolveObjective {
-			method: Method::Minimize(Literal::Identifier("x")),
+			method: Method::Minimize(Literal::Variable(x)),
 			ann: vec![ann],
 		};
 		assert_eq!(
@@ -676,22 +578,6 @@ mod tests {
 		exp.assert_debug_eq(&fzn);
 		let fzn2: FlatZinc = serde_json::from_str(&serde_json::to_string(&fzn).unwrap()).unwrap();
 		assert_eq!(fzn, fzn2)
-	}
-
-	#[test]
-	fn test_vec_backed_maps_deserialize_from_object_shape() {
-		type VecFlatZinc =
-			FlatZinc<String, Vec<(String, Variable<String>)>, Vec<(String, Array<String>)>>;
-
-		let mut rdr = BufReader::new(
-			File::open(Path::new("./corpus/json/documentation_example.fzn.json")).unwrap(),
-		);
-		let mut content = String::new();
-		let _ = rdr.read_to_string(&mut content).unwrap();
-
-		let fzn: VecFlatZinc = serde_json::from_str(&content).unwrap();
-		assert!(!fzn.variables.is_empty());
-		assert!(!fzn.arrays.is_empty());
 	}
 
 	test_file!(documentation_example);

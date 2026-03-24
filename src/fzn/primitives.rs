@@ -1,24 +1,19 @@
 //! Parsers for tokens used throughout the FlatZinc grammar.
 
-use std::fmt::{Debug, Display};
-
 use rangelist::RangeList;
 use winnow::{
 	Parser, Result,
 	ascii::{digit1, hex_digit1, multispace1, oct_digit1},
 	combinator::{alt, delimited, opt, separated, separated_pair, trace},
-	error::{ContextError, FromExternalError},
+	error::ContextError,
 	stream::AsChar,
 	token::{one_of, take_till, take_until, take_while},
 };
 
-use crate::{Literal, fzn::Stream};
+use crate::{fzn::Stream, intermediate::Literal};
 
 /// Parse a `/* ... */` block comment.
-fn block_comment<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
-where
-	I: Debug,
-{
+fn block_comment<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<()> {
 	delimited("/*", take_until(0.., "*/"), "*/")
 		.void()
 		.parse_next(input)
@@ -27,23 +22,19 @@ where
 /// Parses a boolean literal.
 ///
 /// ```bnf
-/// <bool-literal> ::= "false"
-///                  | "true"
+/// <bool-literal> ::= "true" | "false"
 /// ```
-pub(super) fn boolean<I: Debug, F>(input: &mut Stream<'_, '_, I, F>) -> Result<bool> {
+pub(super) fn boolean<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<bool> {
 	alt(("true".map(|_| true), "false".map(|_| false))).parse_next(input)
 }
 
-/// Parses a list of elements seperated by a comma, and delimited by
-/// `open_token` and `close_token`.
-pub(super) fn delimited_list<'source, 'state, T, I, F: 'state>(
+/// Parses a list of elements separated by a comma and delimited by the given
+/// opening and closing tokens.
+pub(super) fn delimited_list<'source, Identifier, F, T>(
 	open_token: &'static str,
-	element_parser: impl Parser<Stream<'source, 'state, I, F>, T, ContextError>,
+	element_parser: impl Parser<Stream<'source, Identifier, F>, T, ContextError>,
 	close_token: &'static str,
-) -> impl Parser<Stream<'source, 'state, I, F>, Vec<T>, ContextError>
-where
-	I: Debug + 'state,
-{
+) -> impl Parser<Stream<'source, Identifier, F>, Vec<T>, ContextError> {
 	delimited(
 		token(open_token),
 		separated(0.., token(element_parser), token(",")),
@@ -58,8 +49,8 @@ where
 ///                   | [-]?[0-9]+.[0-9]+[Ee][-+]?[0-9]+
 ///                   | [-]?[0-9]+[Ee][-+]?[0-9]+
 /// ```
-pub(super) fn float<I: Debug, F>(input: &mut Stream<'_, '_, I, F>) -> Result<f64> {
-	trace("float", move |input: &mut Stream<'_, '_, I, F>| {
+pub(super) fn float<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<f64> {
+	trace("float", move |input: &mut Stream<'_, Identifier, F>| {
 		(
 			opt('-'),
 			digit1,
@@ -83,33 +74,14 @@ pub(super) fn float<I: Debug, F>(input: &mut Stream<'_, '_, I, F>) -> Result<f64
 	.parse_next(input)
 }
 
-/// Parses an identifier.
+/// Parses an internable identifier as borrowed source text.
 ///
 /// ```bnf
 /// <var-par-identifier> ::= [A-Za-z_][A-Za-z0-9_]*
 /// ```
-pub(super) fn identifier<I, F, E>(input: &mut Stream<'_, '_, I, F>) -> Result<I>
-where
-	F: FnMut(&str) -> std::result::Result<I, E>,
-	E: Display,
-	I: Debug,
-{
-	let ident = identifier_raw.parse_next(input)?;
-	input
-		.state
-		.intern(ident)
-		.map_err(|err| ContextError::from_external_error(input, err))
-}
-
-/// Parses an identifier.
-///
-/// ```bnf
-/// <var-par-identifier> ::= [A-Za-z_][A-Za-z0-9_]*
-/// ```
-pub(super) fn identifier_raw<'a, I, F>(input: &mut Stream<'a, '_, I, F>) -> Result<&'a str>
-where
-	I: Debug,
-{
+pub(super) fn identifier<'a, Identifier, F>(
+	input: &mut Stream<'a, Identifier, F>,
+) -> Result<&'a str> {
 	trace(
 		"identifier",
 		(
@@ -122,10 +94,7 @@ where
 }
 
 /// Parse insignificant whitespace and comments.
-fn ignored<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
-where
-	I: Debug,
-{
+fn ignored<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<()> {
 	while alt((
 		multispace1.void(),
 		line_comment.void(),
@@ -145,8 +114,8 @@ where
 ///                 | [-]?0x[0-9A-Fa-f]+
 ///                 | [-]?0o[0-7]+
 /// ```
-pub(super) fn int<I: Debug, F>(input: &mut Stream<'_, '_, I, F>) -> Result<i64> {
-	trace("int", move |input: &mut Stream<'_, '_, I, F>| {
+pub(super) fn int<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<i64> {
+	trace("int", move |input: &mut Stream<'_, Identifier, F>| {
 		let is_negative = opt('-').parse_next(input)?.is_some();
 
 		let unsigned_integer = alt((
@@ -166,14 +135,13 @@ pub(super) fn int<I: Debug, F>(input: &mut Stream<'_, '_, I, F>) -> Result<i64> 
 }
 
 /// Higher-order parser for `<token> .. <token>`.
-pub(super) fn interval_set<'source, 'state, T, I, F: 'state>(
-	elem_parser: impl Parser<Stream<'source, 'state, I, F>, T, ContextError> + Copy,
-) -> impl Parser<Stream<'source, 'state, I, F>, RangeList<T>, ContextError>
+pub(super) fn interval_set<'source, Identifier, F, T>(
+	elem_parser: impl Parser<Stream<'source, Identifier, F>, T, ContextError> + Copy,
+) -> impl Parser<Stream<'source, Identifier, F>, RangeList<T>, ContextError>
 where
 	T: PartialOrd + Copy + 'static,
-	I: Debug + 'state,
 {
-	move |input: &mut Stream<'source, 'state, I, F>| {
+	move |input: &mut Stream<'source, Identifier, F>| {
 		separated_pair(token(elem_parser), token(".."), token(elem_parser))
 			.map(|(start, end)| RangeList::from_iter([start..=end]))
 			.parse_next(input)
@@ -181,10 +149,7 @@ where
 }
 
 /// Parse a `%` line comment.
-fn line_comment<I, F>(input: &mut Stream<'_, '_, I, F>) -> Result<()>
-where
-	I: Debug,
-{
+fn line_comment<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<()> {
 	('%', take_till(0.., |c| c == '\n'), opt('\n'))
 		.void()
 		.parse_next(input)
@@ -197,47 +162,34 @@ where
 ///                        | <int-literal>
 ///                        | <float-literal>
 ///                        | <set-literal>
+///                        | <string-literal>
 /// ```
-pub(super) fn literal<'a, 's, I, F, E>(input: &mut Stream<'a, 's, I, F>) -> Result<Literal<I>>
-where
-	I: Clone + Debug,
-	F: FnMut(&str) -> std::result::Result<I, E>,
-	E: Display,
-{
+pub(super) fn literal<'a, Identifier, F>(input: &mut Stream<'a, Identifier, F>) -> Result<Literal> {
+	enum ParsedLiteral<'a> {
+		Literal(Literal),
+		Identifier(&'a str),
+	}
+
 	// This can be optimized if it turns out to be a bottleneck. At the moment, to
 	// parse a literal, it will first attempt to parse a float and, if that fails,
 	// parse an integer. We can be more clever about that by peeking at the next
 	// character to determine what is being parsed.
-
 	let parsed_literal = alt((
-		set(int).map(Literal::IntSet),
-		set(float).map(Literal::FloatSet),
-		boolean.map(Literal::Bool),
-		float.map(Literal::Float),
-		int.map(Literal::Int),
-		identifier_raw.map(Literal::Identifier),
+		set(int).map(Literal::IntSet).map(ParsedLiteral::Literal),
+		set(float)
+			.map(Literal::FloatSet)
+			.map(ParsedLiteral::Literal),
+		boolean.map(Literal::Bool).map(ParsedLiteral::Literal),
+		float.map(Literal::Float).map(ParsedLiteral::Literal),
+		int.map(Literal::Int).map(ParsedLiteral::Literal),
+		string.map(Literal::String).map(ParsedLiteral::Literal),
+		identifier.map(ParsedLiteral::Identifier),
 	))
 	.parse_next(input)?;
 
 	Ok(match parsed_literal {
-		Literal::Identifier(ident) => {
-			if let Some(literal) = input.state.resolve(ident).cloned() {
-				literal
-			} else {
-				Literal::Identifier(
-					input
-						.state
-						.intern(ident)
-						.map_err(|err| ContextError::from_external_error(input, err))?,
-				)
-			}
-		}
-		Literal::Int(i) => Literal::Int(i),
-		Literal::Float(f) => Literal::Float(f),
-		Literal::Bool(b) => Literal::Bool(b),
-		Literal::IntSet(r) => Literal::IntSet(r),
-		Literal::FloatSet(r) => Literal::FloatSet(r),
-		Literal::String(s) => Literal::String(s),
+		ParsedLiteral::Literal(literal) => literal,
+		ParsedLiteral::Identifier(ident) => Literal::Reference(input.state.intern_name(ident)),
 	})
 }
 
@@ -254,160 +206,162 @@ where
 /// <set-term> ::= "{" [ <elem> "," ... ] "}"
 ///              | <elem> ".." <elem>
 /// ```
-pub(super) fn set<'source, 'state, T, I, F: 'state>(
-	elem_parser: impl Parser<Stream<'source, 'state, I, F>, T, ContextError> + Copy,
-) -> impl Parser<Stream<'source, 'state, I, F>, RangeList<T>, ContextError>
+pub(super) fn set<'source, Identifier, F, T>(
+	elem_parser: impl Parser<Stream<'source, Identifier, F>, T, ContextError> + Copy,
+) -> impl Parser<Stream<'source, Identifier, F>, RangeList<T>, ContextError>
 where
-	I: Debug + 'state,
 	T: PartialOrd + Copy + 'static,
 {
-	move |input: &mut Stream<'source, 'state, I, F>| -> Result<RangeList<T>> {
-		let sparse_set = delimited(
-			token('{'),
-			separated(0.., token(elem_parser), token(',')),
-			token('}'),
+	fn set_literal<'source, Identifier, F, T>(
+		elem_parser: impl Parser<Stream<'source, Identifier, F>, T, ContextError> + Copy,
+	) -> impl Parser<Stream<'source, Identifier, F>, RangeList<T>, ContextError>
+	where
+		T: PartialOrd + Copy + 'static,
+	{
+		move |input: &mut Stream<'source, Identifier, F>| {
+			delimited_list("{", elem_parser, "}")
+				.map(|values: Vec<T>| values.into_iter().map(|x| x..=x).collect())
+				.parse_next(input)
+		}
+	}
+
+	move |input: &mut Stream<'source, Identifier, F>| {
+		separated(
+			1..,
+			alt((interval_set(elem_parser), set_literal(elem_parser))),
+			token("union"),
 		)
-		.map(|elems: Vec<T>| RangeList::from_iter(elems.into_iter().map(|elem| elem..=elem)));
-
-		let set_term = alt((sparse_set, interval_set(elem_parser)));
-		let mut set_union = separated(1.., token(set_term), token("union"))
-			.map(|ranges: Vec<RangeList<T>>| RangeList::from_iter(ranges.into_iter().flatten()));
-
-		set_union.parse_next(input)
+		.map(|values: Vec<RangeList<T>>| values.into_iter().flatten().collect())
+		.parse_next(input)
 	}
 }
 
-/// Parses a token from the input.
-///
-/// Wraps the given parser with optional preceding and succeeding whitespace or
-/// comments.
-pub(super) fn token<'source, 'state, T, I, F: 'state>(
-	parser: impl Parser<Stream<'source, 'state, I, F>, T, ContextError>,
-) -> impl Parser<Stream<'source, 'state, I, F>, T, ContextError>
-where
-	I: Debug + 'state,
-{
+/// Parse a `%` line comment.
+fn string<Identifier, F>(input: &mut Stream<'_, Identifier, F>) -> Result<String> {
+	delimited('"', take_till(0.., |c| c == '"'), '"')
+		.map(String::from)
+		.parse_next(input)
+}
+
+/// Parse optional whitespace around a token parser.
+pub(super) fn token<'source, Identifier, F, T>(
+	parser: impl Parser<Stream<'source, Identifier, F>, T, ContextError>,
+) -> impl Parser<Stream<'source, Identifier, F>, T, ContextError> {
 	delimited(ignored, parser, ignored)
 }
 
 #[cfg(test)]
 mod tests {
-	use std::collections::HashMap;
 
 	use rangelist::RangeList;
-	use winnow::{Parser, Stateful};
 
 	use crate::{
-		Literal,
-		fzn::{ParseState, literal, tests::check_parser},
+		fzn::{
+			literal,
+			tests::{name_id, parse_with_names},
+		},
+		intermediate::Literal,
 	};
 
 	#[test]
 	fn boolean_literal() {
-		check_parser(literal, Literal::Bool(true), "true");
-		check_parser(literal, Literal::Bool(false), "false");
+		assert_eq!(parse_with_names(literal, "true").0, Literal::Bool(true));
+		assert_eq!(parse_with_names(literal, "false").0, Literal::Bool(false));
 	}
 
 	#[test]
 	fn float_literal() {
-		check_parser(literal, Literal::Float(3.02), "3.02");
-		check_parser(literal, Literal::Float(-34.85), "-34.85");
-		check_parser(literal, Literal::Float(5e-1), "5e-1");
-		check_parser(literal, Literal::Float(5e12), "5e12");
-		check_parser(literal, Literal::Float(-11e3), "-11e3");
-		check_parser(literal, Literal::Float(5e-1), "5E-1");
-		check_parser(literal, Literal::Float(5e12), "5E12");
-		check_parser(literal, Literal::Float(-11e3), "-11E3");
-		check_parser(literal, Literal::Float(5.2e-1), "5.2E-1");
-		check_parser(literal, Literal::Float(5.54e12), "5.54E12");
-		check_parser(literal, Literal::Float(-11e3), "-11E+3");
+		assert_eq!(parse_with_names(literal, "3.02").0, Literal::Float(3.02));
+		assert_eq!(
+			parse_with_names(literal, "-34.85").0,
+			Literal::Float(-34.85)
+		);
+		assert_eq!(parse_with_names(literal, "5e-1").0, Literal::Float(5e-1));
+		assert_eq!(parse_with_names(literal, "5e12").0, Literal::Float(5e12));
+		assert_eq!(parse_with_names(literal, "-11e3").0, Literal::Float(-11e3));
+		assert_eq!(parse_with_names(literal, "5E-1").0, Literal::Float(5e-1));
+		assert_eq!(parse_with_names(literal, "5E12").0, Literal::Float(5e12));
+		assert_eq!(parse_with_names(literal, "-11E3").0, Literal::Float(-11e3));
+		assert_eq!(
+			parse_with_names(literal, "5.2E-1").0,
+			Literal::Float(5.2e-1)
+		);
+		assert_eq!(
+			parse_with_names(literal, "5.54E12").0,
+			Literal::Float(5.54e12)
+		);
+		assert_eq!(parse_with_names(literal, "-11E+3").0, Literal::Float(-11e3));
 	}
 
 	#[test]
 	fn float_set_literal() {
-		check_parser(literal, Literal::IntSet(RangeList::from(1..=5)), "1..5");
-		check_parser(
-			literal,
-			Literal::FloatSet(RangeList::from_iter([1.3..=1.3, 4e3..=4e3, -4.8..=-4.8])),
-			"{1.3, 4e3, -4.8}",
+		assert_eq!(
+			parse_with_names(literal, "1..5").0,
+			Literal::IntSet(RangeList::from(1..=5))
 		);
-		check_parser(
-			literal,
-			Literal::FloatSet(RangeList::from_iter([2.0..=2.0, 2.5..=3.0])),
-			"2.0..2.0 union 2.5..3.0",
+		assert_eq!(
+			parse_with_names(literal, "{1.3, 4e3, -4.8}").0,
+			Literal::FloatSet(RangeList::from_iter([1.3..=1.3, 4e3..=4e3, -4.8..=-4.8]))
 		);
-		check_parser(
-			literal,
-			Literal::FloatSet(RangeList::from_iter([1.0..=1.0, 2.5..=3.0])),
-			"{1.0} union 2.5..3.0",
+		assert_eq!(
+			parse_with_names(literal, "2.0..2.0 union 2.5..3.0").0,
+			Literal::FloatSet(RangeList::from_iter([2.0..=2.0, 2.5..=3.0]))
+		);
+		assert_eq!(
+			parse_with_names(literal, "{1.0} union 2.5..3.0").0,
+			Literal::FloatSet(RangeList::from_iter([1.0..=1.0, 2.5..=3.0]))
 		);
 	}
 
 	#[test]
 	fn identifier_literal() {
-		check_parser(
-			literal,
-			Literal::Identifier("some_name".to_owned()),
-			"some_name",
-		);
-		check_parser(
-			literal,
-			Literal::Identifier("_some_name".to_owned()),
-			"_some_name",
-		);
-		check_parser(
-			literal,
-			Literal::Identifier("_SomeName283".to_owned()),
-			"_SomeName283",
-		);
-	}
+		let (actual, names) = parse_with_names(literal, "some_name");
+		assert_eq!(actual, Literal::Reference(name_id(&names, "some_name")));
 
-	#[test]
-	fn identifiers_of_parameters_are_resolved() {
-		let mut aliases =
-			HashMap::from_iter([("some_param".to_owned(), Literal::<String>::Int(5))]);
-		let mut interner = |s: &str| Ok::<_, std::convert::Infallible>(s.to_owned());
+		let (actual, names) = parse_with_names(literal, "_some_name");
+		assert_eq!(actual, Literal::Reference(name_id(&names, "_some_name")));
 
-		let stream = Stateful {
-			input: "some_param",
-			state: ParseState::new(&mut aliases, &mut interner),
-		};
-
-		let parsed = literal.parse(stream);
-		match parsed {
-			Ok(actual) => assert_eq!(Literal::Int(5), actual),
-			Err(err) => panic!("expected parameter alias to resolve: {err:?}"),
-		}
+		let (actual, names) = parse_with_names(literal, "_SomeName283");
+		assert_eq!(actual, Literal::Reference(name_id(&names, "_SomeName283")));
 	}
 
 	#[test]
 	fn int_literal() {
-		check_parser(literal, Literal::Int(0), "0");
-		check_parser(literal, Literal::Int(420), "420");
-		check_parser(literal, Literal::Int(-38), "-38");
-		check_parser(literal, Literal::Int(0xff32a), "0xff32a");
-		check_parser(literal, Literal::Int(-0xadc20), "-0xadc20");
-		check_parser(literal, Literal::Int(0o12356), "0o12356");
-		check_parser(literal, Literal::Int(-0o230), "-0o230");
+		assert_eq!(parse_with_names(literal, "0").0, Literal::Int(0));
+		assert_eq!(parse_with_names(literal, "420").0, Literal::Int(420));
+		assert_eq!(parse_with_names(literal, "-38").0, Literal::Int(-38));
+		assert_eq!(
+			parse_with_names(literal, "0xff32a").0,
+			Literal::Int(0xff32a)
+		);
+		assert_eq!(
+			parse_with_names(literal, "-0xadc20").0,
+			Literal::Int(-0xadc20)
+		);
+		assert_eq!(
+			parse_with_names(literal, "0o12356").0,
+			Literal::Int(0o12356)
+		);
+		assert_eq!(parse_with_names(literal, "-0o230").0, Literal::Int(-0o230));
 	}
 
 	#[test]
 	fn int_set_literal() {
-		check_parser(literal, Literal::IntSet(RangeList::from(1..=5)), "1..5");
-		check_parser(
-			literal,
-			Literal::IntSet(RangeList::from_iter([1..=1, 4..=4, 6..=6])),
-			"{1, 4, 6}",
+		assert_eq!(
+			parse_with_names(literal, "1..5").0,
+			Literal::IntSet(RangeList::from(1..=5))
 		);
-		check_parser(
-			literal,
-			Literal::IntSet(RangeList::from_iter([1..=2, 4..=6])),
-			"1..2 union 4..6",
+		assert_eq!(
+			parse_with_names(literal, "{1, 4, 6}").0,
+			Literal::IntSet(RangeList::from_iter([1..=1, 4..=4, 6..=6]))
 		);
-		check_parser(
-			literal,
-			Literal::IntSet(RangeList::from_iter([1..=1, 4..=5])),
-			"{1} union 4..5",
+		assert_eq!(
+			parse_with_names(literal, "1..2 union 4..6").0,
+			Literal::IntSet(RangeList::from_iter([1..=2, 4..=6]))
+		);
+		assert_eq!(
+			parse_with_names(literal, "{1} union 4..5").0,
+			Literal::IntSet(RangeList::from_iter([1..=1, 4..=5]))
 		);
 	}
 }

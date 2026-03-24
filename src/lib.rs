@@ -113,24 +113,25 @@
 //! FlatZinc JSON file, and potentially any registered standard and extra flags
 //! (e.g., `../../../bin/fzn-my-solver model.fzn.json`).
 
+mod error;
 #[cfg(feature = "fzn")]
 mod fzn;
+#[cfg(any(feature = "fzn", feature = "serde"))]
+mod intermediate;
 #[cfg(feature = "serde")]
 mod serde_impl;
 
-#[cfg(feature = "serde")]
-use std::borrow::Cow;
 use std::{
-	collections::BTreeMap,
+	collections::HashSet,
 	fmt::{Debug, Display},
+	sync::{Arc, Weak},
 };
 
 pub use rangelist::RangeList;
 #[cfg(feature = "serde")]
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserializer, Serialize};
 
-#[cfg(feature = "fzn")]
-pub use crate::fzn::FznParseError;
+pub use crate::error::{FznParseError, LinkError};
 
 /// Additional information provided in a standardized format for declarations,
 /// constraints, or solve objectives
@@ -141,7 +142,7 @@ pub use crate::fzn::FznParseError;
 /// Note that annotations are generally defined either in the MiniZinc standard
 /// library or in a solver's redefinition library. Solvers are encouraged to
 /// rewrite annotations in their redefinitions library when required.
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Clone, PartialEq, Debug)]
 pub enum Annotation<Identifier = String> {
@@ -152,18 +153,24 @@ pub enum Annotation<Identifier = String> {
 }
 
 /// The argument type associated with [`AnnotationCall`]
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 pub enum AnnotationArgument<Identifier = String> {
 	/// Sequence of [`Literal`]s
 	Array(Vec<AnnotationLiteral<Identifier>>),
+	#[cfg_attr(
+		feature = "serde",
+		serde(serialize_with = "serde_impl::serialize_array_weak")
+	)]
+	/// Named array of [`Literal`]s
+	ArrayNamed(Weak<Array<Identifier>>),
 	/// Singular argument
 	Literal(AnnotationLiteral<Identifier>),
 }
 
 /// An object depicting an annotation in the form of a call
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename = "annotation_call"))]
 #[derive(Clone, PartialEq, Debug)]
 pub struct AnnotationCall<Identifier = String> {
@@ -173,28 +180,66 @@ pub struct AnnotationCall<Identifier = String> {
 	pub args: Vec<AnnotationArgument<Identifier>>,
 }
 
-///Literal values as arguments to [`AnnotationCall`]
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
+/// Literal values as arguments to [`AnnotationCall`]
 pub enum AnnotationLiteral<Identifier = String> {
-	/// Basic FlatZinc literal (including annotation identifiers).
-	BaseLiteral(Literal<Identifier>),
-	/// An annotation call object.
-	Annotation(AnnotationCall<Identifier>),
+	/// Integer value
+	Int(i64),
+	/// Floating point value
+	Float(f64),
+	#[cfg_attr(
+		feature = "serde",
+		serde(serialize_with = "serde_impl::serialize_variable_weak")
+	)]
+	/// Reference to a decision variable.
+	Variable(Weak<Variable<Identifier>>),
+	/// Boolean value
+	Bool(bool),
+	#[cfg_attr(
+		feature = "serde",
+		serde(serialize_with = "serde_impl::serialize_encapsulate_set")
+	)]
+	/// Set of integers, represented as a list of integer ranges
+	IntSet(RangeList<i64>),
+	#[cfg_attr(
+		feature = "serde",
+		serde(serialize_with = "serde_impl::serialize_encapsulate_set")
+	)]
+	/// Set of floating point values, represented as a list of floating point
+	/// ranges
+	FloatSet(RangeList<f64>),
+	#[cfg_attr(
+		feature = "serde",
+		serde(serialize_with = "serde_impl::serialize_encapsulate_string")
+	)]
+	/// String value
+	String(String),
+	/// An annotation object.
+	Annotation(Annotation<Identifier>),
 }
 
 /// The argument type associated with [`Constraint`]
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Clone, PartialEq, Debug)]
 pub enum Argument<Identifier = String> {
 	/// Sequence of [`Literal`]s
 	Array(Vec<Literal<Identifier>>),
+	/// Sequence of [`Literal`]s
+	#[cfg_attr(
+		feature = "serde",
+		serde(serialize_with = "serde_impl::serialize_array_arc",)
+	)]
+	ArrayNamed(Arc<Array<Identifier>>),
 	/// Literal
 	Literal(Literal<Identifier>),
 }
 
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", serde(rename = "array"))]
+#[derive(Clone, PartialEq, Debug)]
 /// A definition of a named array literal in FlatZinc
 ///
 /// FlatZinc Arrays are a simple (one-dimensional) sequence of [`Literal`]s.
@@ -202,59 +247,48 @@ pub enum Argument<Identifier = String> {
 /// information, in the form of [`Annotation`]s, from the MiniZinc model is
 /// stored in [`Array::ann`] when present. When [`Array::defined`] is set to
 /// `true`, then
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "serde", serde(rename = "array"))]
-#[derive(Clone, PartialEq, Debug)]
 pub struct Array<Identifier = String> {
-	/// The values stored within the array literal
+	#[cfg_attr(feature = "serde", serde(skip))]
+	/// The optional public name of the array literal.
+	///
+	/// This is `None` for arrays inlined within constraints.
+	pub name: String,
 	#[cfg_attr(feature = "serde", serde(rename = "a"))]
+	/// The values stored within the array literal
 	pub contents: Vec<Literal<Identifier>>,
-	#[cfg_attr(
-		feature = "serde",
-		serde(default, skip_serializing_if = "Vec::is_empty")
-	)]
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
 	/// List of annotations
 	pub ann: Vec<Annotation<Identifier>>,
-	#[cfg_attr(
-		feature = "serde",
-		serde(default, skip_serializing_if = "serde_impl::is_false")
-	)]
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "serde_impl::is_false"))]
 	/// This field is set to `true` when there is a constraint that has been
 	/// marked as defining this array.
 	pub defined: bool,
-	#[cfg_attr(
-		feature = "serde",
-		serde(default, skip_serializing_if = "serde_impl::is_false")
-	)]
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "serde_impl::is_false"))]
 	/// This field is set to `true` when the array has been introduced by the
 	/// MiniZinc compiler, rather than being explicitly defined at the top-level
 	/// of the MiniZinc model.
 	pub introduced: bool,
 }
 
-/// An object depicting a constraint
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename = "constraint"))]
 #[derive(Clone, PartialEq, Debug)]
+/// An object depicting a constraint
 pub struct Constraint<Identifier = String> {
 	/// Identifier of the constraint predicate
 	pub id: Identifier,
 	/// Arguments of the constraint
 	pub args: Vec<Argument<Identifier>>,
-	/// Identifier of the variable that the constraint defines
-	#[cfg_attr(
-		feature = "serde",
-		serde(default, skip_serializing_if = "Option::is_none")
-	)]
-	pub defines: Option<Identifier>,
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+	/// Variable that the constraint defines
+	pub defines: Option<NamedRef<Identifier>>,
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
 	/// List of annotations
-	#[cfg_attr(
-		feature = "serde",
-		serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")
-	)]
 	pub ann: Vec<Annotation<Identifier>>,
 }
 
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Clone, PartialEq, Debug)]
 /// The structure depicting a FlatZinc instance
 ///
 /// FlatZinc is (generally) a format produced by the MiniZinc compiler as a
@@ -265,91 +299,64 @@ pub struct Constraint<Identifier = String> {
 /// eagerly. The resulting public model stores only non-aliased variables, while
 /// references in constraints, arrays, and objectives are rewritten to the
 /// resolved literals.
-#[cfg_attr(feature = "serde", derive(Serialize))]
-#[derive(Clone, PartialEq, Debug)]
-pub struct FlatZinc<
-	Identifier = String,
-	VarMap = BTreeMap<Identifier, Variable<Identifier>>,
-	ArrayMap = BTreeMap<Identifier, Array<Identifier>>,
-> {
-	/// A mapping from decision variable `Identifier` to their definitions
+pub struct FlatZinc<Identifier = String> {
 	#[cfg_attr(
 		feature = "serde",
-		serde(
-			default,
-			bound(
-				serialize = "Identifier: Serialize, for<'a> &'a VarMap: IntoIterator<Item = (&'a Identifier, &'a Variable<Identifier>)>",
-			),
-			serialize_with = "serde_impl::serialize_key_value_object"
-		)
+		serde(serialize_with = "serde_impl::serialize_variable_map")
 	)]
-	pub variables: VarMap,
-	/// A mapping from array `Identifier` to their definitions
+	/// A list of decision variable definitions.
+	pub variables: Vec<Arc<Variable<Identifier>>>,
 	#[cfg_attr(
 		feature = "serde",
-		serde(
-			default,
-			bound(
-				serialize = "Identifier: Serialize, for<'a> &'a ArrayMap: IntoIterator<Item = (&'a Identifier, &'a Array<Identifier>)>",
-			),
-			serialize_with = "serde_impl::serialize_key_value_object"
-		)
+		serde(serialize_with = "serde_impl::serialize_array_map")
 	)]
-	pub arrays: ArrayMap,
+	/// A list of named array definitions.
+	pub arrays: Vec<Arc<Array<Identifier>>>,
 	/// A list of (solver-specific) constraints, that must be satisfied in a
 	/// solution.
 	pub constraints: Vec<Constraint<Identifier>>,
-	/// A list of all identifiers for which the solver must produce output for
-	/// each solution
-	pub output: Vec<Identifier>,
+	/// A list of all entities for which the solver must produce output for each
+	/// solution.
+	pub output: Vec<NamedRef<Identifier>>,
 	/// A specification of the goal of solving the FlatZinc instance.
 	pub solve: SolveObjective<Identifier>,
 	/// The version of the FlatZinc serialization specification used
-	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "String::is_empty"))]
 	pub version: String,
 }
 
-// /// A name used to refer to an [`Array`], function, or [`Variable`]
-// pub type Identifier = String;
-
-/// Literal values
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Clone, PartialEq, Debug)]
+/// Literal values
 pub enum Literal<Identifier = String> {
 	/// Integer value
 	Int(i64),
 	/// Floating point value
 	Float(f64),
-	/// Identifier, i.e., reference to an [`Array`] or [`Variable`]
-	Identifier(Identifier),
+	/// Reference to a decision variable.
+	#[cfg_attr(
+		feature = "serde",
+		serde(serialize_with = "serde_impl::serialize_variable_arc",)
+	)]
+	Variable(Arc<Variable<Identifier>>),
 	/// Boolean value
 	Bool(bool),
 	#[cfg_attr(
 		feature = "serde",
-		serde(
-			serialize_with = "serde_impl::serialize_encapsulate_set",
-			deserialize_with = "serde_impl::deserialize_encapsulated_set"
-		)
+		serde(serialize_with = "serde_impl::serialize_encapsulate_set",)
 	)]
 	/// Set of integers, represented as a list of integer ranges
 	IntSet(RangeList<i64>),
 	#[cfg_attr(
 		feature = "serde",
-		serde(
-			serialize_with = "serde_impl::serialize_encapsulate_set",
-			deserialize_with = "serde_impl::deserialize_encapsulated_set"
-		)
+		serde(serialize_with = "serde_impl::serialize_encapsulate_set",)
 	)]
 	/// Set of floating point values, represented as a list of floating point
 	/// ranges
 	FloatSet(RangeList<f64>),
 	#[cfg_attr(
 		feature = "serde",
-		serde(
-			serialize_with = "serde_impl::serialize_encapsulate_string",
-			deserialize_with = "serde_impl::deserialize_encapsulated_string"
-		)
+		serde(serialize_with = "serde_impl::serialize_encapsulate_string",)
 	)]
 	/// String value
 	String(String),
@@ -365,6 +372,21 @@ pub enum Method<Identifier = String> {
 	Minimize(Literal<Identifier>),
 	/// Find the solution with the highest value for the given objective.
 	Maximize(Literal<Identifier>),
+}
+
+/// Reference to a named top-level declaration (variable or array)
+///
+/// ### Warning
+///
+/// It is possible for an [`Array`] to exist without an `name` attribute, if a
+/// reference to such an [`Array`] is used as a [`NamedRef`], serialization can
+/// panic.
+#[derive(Clone, PartialEq, Debug)]
+pub enum NamedRef<Identifier = String> {
+	/// Reference to a variable
+	Variable(Arc<Variable<Identifier>>),
+	/// Reference to an array.
+	Array(Arc<Array<Identifier>>),
 }
 
 /// A specification of objective of a FlatZinc instance
@@ -399,6 +421,8 @@ pub enum Type {
 /// deserialization of [`Variable`] values does not accept an `rhs` field.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Variable<Identifier = String> {
+	/// The public name of the decision variable.
+	pub name: String,
 	/// The type of the decision variable, and set of potential values  from
 	/// which the decision variable must take its value in a solution, i.e. its
 	/// domain.
@@ -417,9 +441,13 @@ pub struct Variable<Identifier = String> {
 	pub introduced: bool,
 }
 
+/// Return a unique key for a specific variable or array allocation.
+fn arc_key<T>(arc: &Arc<T>) -> usize {
+	Arc::as_ptr(arc) as usize
+}
+
 impl<Identifier: Display> Display for Annotation<Identifier> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "::")?;
 		match self {
 			Annotation::Atom(a) => write!(f, "{a}"),
 			Annotation::Call(c) => write!(f, "{c}"),
@@ -442,7 +470,40 @@ impl<Idenfier: Display> Display for AnnotationArgument<Idenfier> {
 				}
 				write!(f, "]")
 			}
+			AnnotationArgument::ArrayNamed(array) => match array.upgrade() {
+				Some(array) => write!(f, "{}", &array.name),
+				None => write!(f, "[/* dangling array ref */]"),
+			},
 			AnnotationArgument::Literal(lit) => write!(f, "{lit}"),
+		}
+	}
+}
+
+impl<Identifier> From<Argument<Identifier>> for AnnotationArgument<Identifier> {
+	fn from(value: Argument<Identifier>) -> Self {
+		match value {
+			Argument::Array(arr) => {
+				AnnotationArgument::Array(arr.into_iter().map(|l| l.into()).collect())
+			}
+			Argument::ArrayNamed(arr) => AnnotationArgument::ArrayNamed(Arc::downgrade(&arr)),
+			Argument::Literal(l) => AnnotationArgument::Literal(l.into()),
+		}
+	}
+}
+
+impl<Identifier: PartialEq> PartialEq for AnnotationArgument<Identifier> {
+	fn eq(&self, other: &Self) -> bool {
+		match (self, other) {
+			(AnnotationArgument::Array(lhs), AnnotationArgument::Array(rhs)) => lhs == rhs,
+			(AnnotationArgument::ArrayNamed(lhs), AnnotationArgument::ArrayNamed(rhs)) => {
+				match (lhs.upgrade(), rhs.upgrade()) {
+					(Some(lhs), Some(rhs)) => lhs == rhs,
+					(None, None) => true,
+					_ => false,
+				}
+			}
+			(AnnotationArgument::Literal(lhs), AnnotationArgument::Literal(rhs)) => lhs == rhs,
+			_ => false,
 		}
 	}
 }
@@ -465,12 +526,54 @@ impl<Identifier: Display> Display for AnnotationCall<Identifier> {
 impl<Idenfier: Display> Display for AnnotationLiteral<Idenfier> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			AnnotationLiteral::BaseLiteral(lit) => write!(f, "{lit}"),
+			AnnotationLiteral::Int(i) => write!(f, "{i}"),
+			AnnotationLiteral::Float(x) => write!(f, "{x:?}"),
+			AnnotationLiteral::Variable(var) => match var.upgrade() {
+				Some(var) => write!(f, "{}", var.name),
+				None => write!(f, "DANGLING_VARIABLE_REFERENCE"),
+			},
+			AnnotationLiteral::Bool(b) => write!(f, "{b}"),
+			AnnotationLiteral::IntSet(is) => write!(f, "{is}"),
+			AnnotationLiteral::FloatSet(fs) => write!(f, "{fs}"),
+			AnnotationLiteral::String(s) => write!(f, "{s:?}"),
 			AnnotationLiteral::Annotation(ann) => write!(f, "{ann}"),
 		}
 	}
 }
 
+impl<Identifier> From<Literal<Identifier>> for AnnotationLiteral<Identifier> {
+	fn from(value: Literal<Identifier>) -> Self {
+		match value {
+			Literal::Int(i) => AnnotationLiteral::Int(i),
+			Literal::Float(f) => AnnotationLiteral::Float(f),
+			Literal::Bool(b) => AnnotationLiteral::Bool(b),
+			Literal::String(s) => AnnotationLiteral::String(s),
+			Literal::Variable(var) => AnnotationLiteral::Variable(Arc::downgrade(&var)),
+			Literal::IntSet(set) => AnnotationLiteral::IntSet(set),
+			Literal::FloatSet(set) => AnnotationLiteral::FloatSet(set),
+		}
+	}
+}
+
+impl<Identifier: PartialEq> PartialEq for AnnotationLiteral<Identifier> {
+	fn eq(&self, other: &Self) -> bool {
+		match (self, other) {
+			(Self::Int(lhs), Self::Int(rhs)) => lhs == rhs,
+			(Self::Float(lhs), Self::Float(rhs)) => lhs == rhs,
+			(Self::Variable(lhs), Self::Variable(rhs)) => match (lhs.upgrade(), rhs.upgrade()) {
+				(Some(lhs), Some(rhs)) => lhs == rhs,
+				(None, None) => true,
+				_ => false,
+			},
+			(Self::Bool(lhs), Self::Bool(rhs)) => lhs == rhs,
+			(Self::IntSet(lhs), Self::IntSet(rhs)) => lhs == rhs,
+			(Self::FloatSet(lhs), Self::FloatSet(rhs)) => lhs == rhs,
+			(Self::String(lhs), Self::String(rhs)) => lhs == rhs,
+			(Self::Annotation(lhs), Self::Annotation(rhs)) => lhs == rhs,
+			_ => false,
+		}
+	}
+}
 impl<Identifier: Display> Display for Argument<Identifier> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
@@ -486,18 +589,19 @@ impl<Identifier: Display> Display for Argument<Identifier> {
 				}
 				write!(f, "]")
 			}
+			Argument::ArrayNamed(arr) => write!(f, "{}", &arr.name),
 			Argument::Literal(lit) => write!(f, "{lit}"),
 		}
 	}
 }
 
-impl<Identifier: Ord> Array<Identifier> {
+impl<Identifier> Array<Identifier> {
 	/// Heuristic to determine the type of the array
-	fn determine_type(&self, fzn: &FlatZinc<Identifier>) -> (&str, bool) {
+	fn determine_type(&self) -> (&str, bool) {
 		let ty = match self.contents.first().unwrap() {
 			Literal::Int(_) => "int",
 			Literal::Float(_) => "float",
-			Literal::Identifier(ident) => fzn.variables[ident].ty.base_name(),
+			Literal::Variable(var) => return (var.ty.base_name(), true),
 			Literal::Bool(_) => "bool",
 			Literal::IntSet(_) => "set of int",
 			Literal::FloatSet(_) => "set of float",
@@ -506,7 +610,7 @@ impl<Identifier: Ord> Array<Identifier> {
 		let is_var = self
 			.contents
 			.iter()
-			.any(|lit| matches!(lit, Literal::Identifier(_)));
+			.any(|lit| matches!(lit, Literal::Variable(_)));
 		(ty, is_var)
 	}
 }
@@ -524,20 +628,18 @@ impl<Identifier: Display> Display for Constraint<Identifier> {
 		}
 		write!(f, ")")?;
 		if let Some(defines) = &self.defines {
-			write!(f, " ::defines_var({defines})")?
+			write!(f, " ::defines_var({})", defines.name())?
 		}
 		for a in &self.ann {
-			write!(f, " {a}")?
+			write!(f, " ::{a}")?
 		}
 		Ok(())
 	}
 }
 
-impl<Identifier, VarMap, ArrayMap> FlatZinc<Identifier, VarMap, ArrayMap>
+impl<Identifier> FlatZinc<Identifier>
 where
 	Identifier: Clone + Debug,
-	VarMap: FromIterator<(Identifier, Variable<Identifier>)>,
-	ArrayMap: FromIterator<(Identifier, Array<Identifier>)>,
 {
 	#[cfg(feature = "serde")]
 	/// Deserialize a FlatZinc JSON value using a custom identifier interner.
@@ -550,10 +652,15 @@ where
 	) -> Result<Self, D::Error>
 	where
 		D: Deserializer<'de>,
-		F: FnMut(Cow<'de, str>) -> Result<Identifier, E>,
+		F: FnMut(&str) -> Result<Identifier, E>,
 		E: Display,
 	{
-		serde_impl::seeded::deserialize_flatzinc_with_interner(deserializer, interner)
+		use serde::de::{self, DeserializeSeed};
+
+		use crate::intermediate::ParserState;
+
+		let (model, interner) = ParserState::new(interner).deserialize(deserializer)?;
+		FlatZinc::from_intermediate(model, interner).map_err(de::Error::custom)
 	}
 
 	#[cfg(feature = "fzn")]
@@ -584,32 +691,27 @@ where
 	}
 }
 
-impl<Identifier, VarMap, ArrayMap> Default for FlatZinc<Identifier, VarMap, ArrayMap>
-where
-	VarMap: Default,
-	ArrayMap: Default,
-{
+impl<Identifier> Default for FlatZinc<Identifier> {
 	fn default() -> Self {
 		Self {
-			variables: Default::default(),
-			arrays: Default::default(),
+			variables: Vec::new(),
+			arrays: Vec::new(),
 			constraints: Vec::new(),
-			output: Default::default(),
+			output: Vec::new(),
 			solve: Default::default(),
 			version: "1.0".into(),
 		}
 	}
 }
 
-impl<Identifier: Ord + Display> Display for FlatZinc<Identifier> {
+impl<Identifier: Display> Display for FlatZinc<Identifier> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		let output_map: BTreeMap<&Identifier, ()> =
-			self.output.iter().map(|ident| (ident, ())).collect();
+		let output_map: HashSet<_> = self.output.iter().map(|output| output.arc_key()).collect();
 
-		for (ident, var) in &self.variables {
+		for var in &self.variables {
 			write!(f, "var {}", var.ty)?;
-			write!(f, ": {ident}")?;
-			if output_map.contains_key(&ident) {
+			write!(f, ": {}", var.name)?;
+			if output_map.contains(&arc_key(var)) {
 				write!(f, " ::output_var")?;
 			}
 			if var.defined {
@@ -619,19 +721,20 @@ impl<Identifier: Ord + Display> Display for FlatZinc<Identifier> {
 				write!(f, " ::var_is_introduced")?;
 			}
 			for ann in &var.ann {
-				write!(f, " {ann}")?
+				write!(f, " ::{ann}")?
 			}
 			writeln!(f, ";")?
 		}
-		for (ident, arr) in &self.arrays {
-			let (ty, is_var) = arr.determine_type(self);
+		for arr in &self.arrays {
+			let (ty, is_var) = arr.determine_type();
 			write!(
 				f,
-				"array[1..{}] of {}{ty}: {ident}",
+				"array[1..{}] of {}{ty}: {}",
 				arr.contents.len(),
-				if is_var { "var " } else { "" }
+				if is_var { "var " } else { "" },
+				arr.name
 			)?;
-			if output_map.contains_key(&ident) {
+			if output_map.contains(&arc_key(arr)) {
 				write!(f, " ::output_array([1..{}])", arr.contents.len())?;
 			}
 			if arr.defined {
@@ -641,7 +744,7 @@ impl<Identifier: Ord + Display> Display for FlatZinc<Identifier> {
 				write!(f, " ::var_is_introduced")?;
 			}
 			for ann in &arr.ann {
-				write!(f, " {ann}")?
+				write!(f, " ::{ann}")?
 			}
 			write!(f, " = [")?;
 			let mut first = true;
@@ -666,7 +769,7 @@ impl<Identifier: Display> Display for Literal<Identifier> {
 		match self {
 			Literal::Int(i) => write!(f, "{i}"),
 			Literal::Float(x) => write!(f, "{x:?}"),
-			Literal::Identifier(ident) => write!(f, "{ident}"),
+			Literal::Variable(var) => write!(f, "{}", var.name),
 			Literal::Bool(b) => write!(f, "{b}"),
 			Literal::IntSet(is) => write!(f, "{is}"),
 			Literal::FloatSet(fs) => write!(f, "{fs}"),
@@ -685,6 +788,24 @@ impl<Identifier: Display> Display for Method<Identifier> {
 	}
 }
 
+impl<Identifier> NamedRef<Identifier> {
+	/// Return a unique key for the referenced variable or array allocation.
+	fn arc_key(&self) -> usize {
+		match self {
+			NamedRef::Variable(arc) => Arc::as_ptr(arc) as usize,
+			NamedRef::Array(arc) => Arc::as_ptr(arc) as usize,
+		}
+	}
+
+	/// Return the identifier of the referenced output target.
+	pub fn name(&self) -> &str {
+		match self {
+			NamedRef::Variable(var) => &var.name,
+			NamedRef::Array(array) => &array.name,
+		}
+	}
+}
+
 impl<Identifier> Default for SolveObjective<Identifier> {
 	fn default() -> Self {
 		Self {
@@ -698,7 +819,7 @@ impl<Identifier: Display> Display for SolveObjective<Identifier> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "solve ")?;
 		for a in &self.ann {
-			write!(f, "{a} ")?;
+			write!(f, "::{a} ")?;
 		}
 		write!(f, "{}", self.method)
 	}
