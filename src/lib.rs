@@ -116,14 +116,17 @@
 mod error;
 #[cfg(feature = "fzn")]
 mod fzn;
+pub mod helpers;
 #[cfg(any(feature = "fzn", feature = "serde"))]
 mod intermediate;
 #[cfg(feature = "serde")]
 mod serde_impl;
 
 use std::{
+	cmp::Ordering,
 	collections::HashSet,
 	fmt::{Debug, Display},
+	hash::{Hash, Hasher},
 	sync::{Arc, Weak},
 };
 
@@ -132,6 +135,7 @@ pub use rangelist::RangeList;
 use serde::{Deserializer, Serialize};
 
 pub use crate::error::{FznParseError, LinkError};
+use crate::helpers::ArcKey;
 
 /// Additional information provided in a standardized format for declarations,
 /// constraints, or solve objectives
@@ -381,9 +385,15 @@ pub enum Method<Identifier = String> {
 /// It is possible for an [`Array`] to exist without an `name` attribute, if a
 /// reference to such an [`Array`] is used as a [`NamedRef`], serialization can
 /// panic.
-#[derive(Clone, PartialEq, Debug)]
+///
+/// [`NamedRef`] compares, hashes, and orders by the referenced declaration
+/// name. As a consequence, two values that refer to different allocations but
+/// expose the same name are considered equal, and a variable and array with
+/// the same name are also treated as equal for these trait implementations.
+/// Note that this cannot occur in valid FlatZinc models.
+#[derive(Clone, Debug)]
 pub enum NamedRef<Identifier = String> {
-	/// Reference to a variable
+	/// Reference to a variable.
 	Variable(Arc<Variable<Identifier>>),
 	/// Reference to an array.
 	Array(Arc<Array<Identifier>>),
@@ -439,11 +449,6 @@ pub struct Variable<Identifier = String> {
 	/// MiniZinc compiler, rather than being explicitly defined at the top-level
 	/// of the MiniZinc model.
 	pub introduced: bool,
-}
-
-/// Return a unique key for a specific variable or array allocation.
-fn arc_key<T>(arc: &Arc<T>) -> usize {
-	Arc::as_ptr(arc) as usize
 }
 
 impl<Identifier: Display> Display for Annotation<Identifier> {
@@ -613,6 +618,27 @@ impl<Identifier> Array<Identifier> {
 			.any(|lit| matches!(lit, Literal::Variable(_)));
 		(ty, is_var)
 	}
+
+	/// Converts an array reference into an [`ArcKey`](crate::helpers::ArcKey).
+	///
+	/// This is useful when storing arrays in collections such as
+	/// [`HashMap`](std::collections::HashMap),
+	/// [`HashSet`](std::collections::HashSet), and
+	/// [`BTreeMap`](std::collections::BTreeMap), where the key should identify
+	/// the specific parsed array object rather than its contents or `name`.
+	///
+	/// The resulting key uses the allocation / pointer identity of this
+	/// [`Arc`]. Two arrays with the same name and equal contents will
+	/// therefore compare as different keys if they are stored in different
+	/// allocations.
+	///
+	/// During FlatZinc parsing and deserialization, this crate guarantees that
+	/// identical top-level arrays are allocated only once. In those cases,
+	/// `ArcKey` is a good fit for keying collections by the canonical parsed
+	/// array object.
+	pub fn into_key(self: Arc<Self>) -> ArcKey<Self> {
+		ArcKey::new(self)
+	}
 }
 
 impl<Identifier: Display> Display for Constraint<Identifier> {
@@ -706,12 +732,13 @@ impl<Identifier> Default for FlatZinc<Identifier> {
 
 impl<Identifier: Display> Display for FlatZinc<Identifier> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		let output_map: HashSet<_> = self.output.iter().map(|output| output.arc_key()).collect();
+		let output_map: HashSet<_> = self.output.iter().collect();
 
 		for var in &self.variables {
 			write!(f, "var {}", var.ty)?;
 			write!(f, ": {}", var.name)?;
-			if output_map.contains(&arc_key(var)) {
+			let name_ref: NamedRef<_> = Arc::clone(var).into();
+			if output_map.contains(&name_ref) {
 				write!(f, " ::output_var")?;
 			}
 			if var.defined {
@@ -734,7 +761,8 @@ impl<Identifier: Display> Display for FlatZinc<Identifier> {
 				if is_var { "var " } else { "" },
 				arr.name
 			)?;
-			if output_map.contains(&arc_key(arr)) {
+			let name_ref: NamedRef<_> = Arc::clone(arr).into();
+			if output_map.contains(&name_ref) {
 				write!(f, " ::output_array([1..{}])", arr.contents.len())?;
 			}
 			if arr.defined {
@@ -789,20 +817,50 @@ impl<Identifier: Display> Display for Method<Identifier> {
 }
 
 impl<Identifier> NamedRef<Identifier> {
-	/// Return a unique key for the referenced variable or array allocation.
-	fn arc_key(&self) -> usize {
-		match self {
-			NamedRef::Variable(arc) => Arc::as_ptr(arc) as usize,
-			NamedRef::Array(arc) => Arc::as_ptr(arc) as usize,
-		}
-	}
-
 	/// Return the identifier of the referenced output target.
 	pub fn name(&self) -> &str {
 		match self {
 			NamedRef::Variable(var) => &var.name,
 			NamedRef::Array(array) => &array.name,
 		}
+	}
+}
+
+impl<Identifier> Eq for NamedRef<Identifier> {}
+
+impl<Identifier> From<Arc<Array<Identifier>>> for NamedRef<Identifier> {
+	fn from(arc: Arc<Array<Identifier>>) -> Self {
+		NamedRef::Array(arc)
+	}
+}
+
+impl<Identifier> From<Arc<Variable<Identifier>>> for NamedRef<Identifier> {
+	fn from(arc: Arc<Variable<Identifier>>) -> Self {
+		NamedRef::Variable(arc)
+	}
+}
+
+impl<Identifier> Hash for NamedRef<Identifier> {
+	fn hash<H: Hasher>(&self, state: &mut H) {
+		self.name().hash(state);
+	}
+}
+
+impl<Identifier> Ord for NamedRef<Identifier> {
+	fn cmp(&self, other: &Self) -> Ordering {
+		self.name().cmp(other.name())
+	}
+}
+
+impl<Identifier> PartialEq for NamedRef<Identifier> {
+	fn eq(&self, other: &Self) -> bool {
+		self.name() == other.name()
+	}
+}
+
+impl<Identifier> PartialOrd for NamedRef<Identifier> {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
 	}
 }
 
@@ -848,5 +906,29 @@ impl Display for Type {
 			Type::IntSet(Some(domain)) => write!(f, "set of {domain}"),
 			Type::IntSet(None) => write!(f, "set of int"),
 		}
+	}
+}
+
+impl<Identifier> Variable<Identifier> {
+	/// Converts a variable reference into an
+	/// [`ArcKey`](crate::helpers::ArcKey).
+	///
+	/// This is useful when storing variables in collections such as
+	/// [`HashMap`](std::collections::HashMap),
+	/// [`HashSet`](std::collections::HashSet), and
+	/// [`BTreeMap`](std::collections::BTreeMap), where the key should identify
+	/// the specific parsed variable object rather than its fields or `name`.
+	///
+	/// The resulting key uses the allocation / pointer identity of this
+	/// [`Arc`]. Two variables with the same name and equal fields will
+	/// therefore compare as different keys if they are stored in different
+	/// allocations.
+	///
+	/// During FlatZinc parsing and deserialization, this crate guarantees that
+	/// identical top-level variables are allocated only once. In those cases,
+	/// `ArcKey` is a good fit for keying collections by the canonical parsed
+	/// variable object.
+	pub fn into_key(self: Arc<Self>) -> ArcKey<Self> {
+		ArcKey::new(self)
 	}
 }

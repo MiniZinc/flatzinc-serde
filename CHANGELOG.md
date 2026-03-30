@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add support for parsing `.fzn` files when enabling the `fzn` feature.
   Users can access this functionality via the `FlatZinc::from_fzn` method.
+- Add helper type `ArcKey`, to use in collections that use variables or arrays as keys.
+  `ArcKey` uses pointer identity to determine its order, equality, and hash value.
+  Similarly, `NamedRef` can be used as a key, where the `name` attribute of variables and arrays are used to compare.
 
 ### Changed
 
