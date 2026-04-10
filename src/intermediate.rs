@@ -201,9 +201,9 @@ pub(crate) struct ParserState<Identifier, F> {
 	pub(crate) names: NameStore<Identifier>,
 	/// Caller-provided predicate/annotation identifier interner.
 	pub(crate) interner: F,
-	#[cfg(feature = "fzn")]
 	/// Deferred identifier-interning failure captured during parser-driven
 	/// parsing.
+	#[cfg(feature = "fzn")]
 	pub(crate) identifier_error: Option<LinkError>,
 }
 
@@ -702,8 +702,8 @@ impl<Identifier: PartialEq> PartialEq for NameStore<Identifier> {
 }
 
 impl<Identifier, F> ParserState<Identifier, F> {
-	#[cfg(feature = "serde")]
 	/// Define one array declaration in the intermediate namespace.
+	#[cfg(feature = "serde")]
 	pub(crate) fn define_array(
 		&mut self,
 		name: NameId,
@@ -721,8 +721,8 @@ impl<Identifier, F> ParserState<Identifier, F> {
 		self.names.define_name(name, decl)
 	}
 
-	#[cfg(feature = "serde")]
 	/// Define one variable declaration in the intermediate namespace.
+	#[cfg(feature = "serde")]
 	pub(crate) fn define_variable(
 		&mut self,
 		name: NameId,
@@ -731,8 +731,8 @@ impl<Identifier, F> ParserState<Identifier, F> {
 		self.define_name(name, Declaration::Variable(variable))
 	}
 
-	#[cfg(feature = "fzn")]
 	/// Intern one model-level name and return its compact identifier.
+	#[cfg(feature = "fzn")]
 	pub(crate) fn intern_name(&mut self, name: &str) -> NameId {
 		self.names.intern(name)
 	}
@@ -752,8 +752,8 @@ impl<Identifier, F> ParserState<Identifier, F> {
 		}
 	}
 
-	#[cfg(feature = "fzn")]
 	/// Record an identifier-interning failure for later reporting.
+	#[cfg(feature = "fzn")]
 	pub(crate) fn record_identifier_error(&mut self, ident: &str, err: String) {
 		self.identifier_error = Some(LinkError::IdentifierError {
 			ident: ident.to_owned(),
@@ -761,8 +761,8 @@ impl<Identifier, F> ParserState<Identifier, F> {
 		});
 	}
 
-	#[cfg(feature = "fzn")]
 	/// Extract the deferred identifier-interning failure, if any.
+	#[cfg(feature = "fzn")]
 	pub(crate) fn take_identifier_error(&mut self) -> Option<LinkError> {
 		self.identifier_error.take()
 	}

@@ -22,8 +22,8 @@ use crate::{
 	},
 };
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 /// Represents the current parsing phase.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum ParsePhase {
 	/// Accepting all items, possibly already parsed a predicate declaration.
 	Predicates,

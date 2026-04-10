@@ -184,41 +184,41 @@ pub struct AnnotationCall<Identifier = String> {
 	pub args: Vec<AnnotationArgument<Identifier>>,
 }
 
+/// Literal values as arguments to [`AnnotationCall`]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Clone, Debug)]
-/// Literal values as arguments to [`AnnotationCall`]
 pub enum AnnotationLiteral<Identifier = String> {
 	/// Integer value
 	Int(i64),
 	/// Floating point value
 	Float(f64),
+	/// Reference to a decision variable.
 	#[cfg_attr(
 		feature = "serde",
 		serde(serialize_with = "serde_impl::serialize_variable_weak")
 	)]
-	/// Reference to a decision variable.
 	Variable(Weak<Variable<Identifier>>),
 	/// Boolean value
 	Bool(bool),
-	#[cfg_attr(
-		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_encapsulate_set")
-	)]
 	/// Set of integers, represented as a list of integer ranges
-	IntSet(RangeList<i64>),
 	#[cfg_attr(
 		feature = "serde",
 		serde(serialize_with = "serde_impl::serialize_encapsulate_set")
 	)]
+	IntSet(RangeList<i64>),
 	/// Set of floating point values, represented as a list of floating point
 	/// ranges
+	#[cfg_attr(
+		feature = "serde",
+		serde(serialize_with = "serde_impl::serialize_encapsulate_set")
+	)]
 	FloatSet(RangeList<f64>),
+	/// String value
 	#[cfg_attr(
 		feature = "serde",
 		serde(serialize_with = "serde_impl::serialize_encapsulate_string")
 	)]
-	/// String value
 	String(String),
 	/// An annotation object.
 	Annotation(Annotation<Identifier>),
@@ -241,9 +241,6 @@ pub enum Argument<Identifier = String> {
 	Literal(Literal<Identifier>),
 }
 
-#[cfg_attr(feature = "serde", derive(Serialize))]
-#[cfg_attr(feature = "serde", serde(rename = "array"))]
-#[derive(Clone, PartialEq, Debug)]
 /// A definition of a named array literal in FlatZinc
 ///
 /// FlatZinc Arrays are a simple (one-dimensional) sequence of [`Literal`]s.
@@ -251,48 +248,49 @@ pub enum Argument<Identifier = String> {
 /// information, in the form of [`Annotation`]s, from the MiniZinc model is
 /// stored in [`Array::ann`] when present. When [`Array::defined`] is set to
 /// `true`, then
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", serde(rename = "array"))]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Array<Identifier = String> {
-	#[cfg_attr(feature = "serde", serde(skip))]
 	/// The optional public name of the array literal.
 	///
 	/// This is `None` for arrays inlined within constraints.
+	#[cfg_attr(feature = "serde", serde(skip))]
 	pub name: String,
-	#[cfg_attr(feature = "serde", serde(rename = "a"))]
 	/// The values stored within the array literal
+	#[cfg_attr(feature = "serde", serde(rename = "a"))]
 	pub contents: Vec<Literal<Identifier>>,
-	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
 	/// List of annotations
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
 	pub ann: Vec<Annotation<Identifier>>,
-	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "serde_impl::is_false"))]
 	/// This field is set to `true` when there is a constraint that has been
 	/// marked as defining this array.
-	pub defined: bool,
 	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "serde_impl::is_false"))]
+	pub defined: bool,
 	/// This field is set to `true` when the array has been introduced by the
 	/// MiniZinc compiler, rather than being explicitly defined at the top-level
 	/// of the MiniZinc model.
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "serde_impl::is_false"))]
 	pub introduced: bool,
 }
 
+/// An object depicting a constraint
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename = "constraint"))]
 #[derive(Clone, PartialEq, Debug)]
-/// An object depicting a constraint
 pub struct Constraint<Identifier = String> {
 	/// Identifier of the constraint predicate
 	pub id: Identifier,
 	/// Arguments of the constraint
 	pub args: Vec<Argument<Identifier>>,
-	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
 	/// Variable that the constraint defines
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
 	pub defines: Option<NamedRef<Identifier>>,
-	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
 	/// List of annotations
+	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
 	pub ann: Vec<Annotation<Identifier>>,
 }
 
-#[cfg_attr(feature = "serde", derive(Serialize))]
-#[derive(Clone, PartialEq, Debug)]
 /// The structure depicting a FlatZinc instance
 ///
 /// FlatZinc is (generally) a format produced by the MiniZinc compiler as a
@@ -303,6 +301,8 @@ pub struct Constraint<Identifier = String> {
 /// eagerly. The resulting public model stores only non-aliased variables, while
 /// references in constraints, arrays, and objectives are rewritten to the
 /// resolved literals.
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Clone, PartialEq, Debug)]
 pub struct FlatZinc<Identifier = String> {
 	#[cfg_attr(
 		feature = "serde",
@@ -328,10 +328,10 @@ pub struct FlatZinc<Identifier = String> {
 	pub version: String,
 }
 
+/// Literal values
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Clone, PartialEq, Debug)]
-/// Literal values
 pub enum Literal<Identifier = String> {
 	/// Integer value
 	Int(i64),
@@ -345,32 +345,32 @@ pub enum Literal<Identifier = String> {
 	Variable(Arc<Variable<Identifier>>),
 	/// Boolean value
 	Bool(bool),
-	#[cfg_attr(
-		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_encapsulate_set",)
-	)]
 	/// Set of integers, represented as a list of integer ranges
-	IntSet(RangeList<i64>),
 	#[cfg_attr(
 		feature = "serde",
 		serde(serialize_with = "serde_impl::serialize_encapsulate_set",)
 	)]
+	IntSet(RangeList<i64>),
 	/// Set of floating point values, represented as a list of floating point
 	/// ranges
+	#[cfg_attr(
+		feature = "serde",
+		serde(serialize_with = "serde_impl::serialize_encapsulate_set",)
+	)]
 	FloatSet(RangeList<f64>),
+	/// String value
 	#[cfg_attr(
 		feature = "serde",
 		serde(serialize_with = "serde_impl::serialize_encapsulate_string",)
 	)]
-	/// String value
 	String(String),
 }
 
 /// Goal of solving a FlatZinc instance.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Method<Identifier = String> {
-	#[default]
 	/// Find any solution.
+	#[default]
 	Satisfy,
 	/// Find the solution with the lowest value for the given objective.
 	Minimize(Literal<Identifier>),
@@ -667,11 +667,11 @@ impl<Identifier> FlatZinc<Identifier>
 where
 	Identifier: Clone + Debug,
 {
-	#[cfg(feature = "serde")]
 	/// Deserialize a FlatZinc JSON value using a custom identifier interner.
 	///
 	/// Variable right-hand side declarations are resolved eagerly, so aliased
 	/// variables are omitted from the returned [`FlatZinc::variables`] map.
+	#[cfg(feature = "serde")]
 	pub fn deserialize_with_interner<'de, D, F, E>(
 		deserializer: D,
 		interner: F,
@@ -689,8 +689,8 @@ where
 		FlatZinc::from_intermediate(model, interner).map_err(de::Error::custom)
 	}
 
-	#[cfg(feature = "fzn")]
 	/// Parse a `.fzn` source into a [`FlatZinc`] instance.
+	#[cfg(feature = "fzn")]
 	pub fn from_fzn<E>(source: impl std::io::BufRead) -> Result<Self, FznParseError>
 	where
 		for<'a> Identifier: TryFrom<&'a str, Error = E>,
@@ -699,12 +699,12 @@ where
 		fzn::parse(source)
 	}
 
-	#[cfg(feature = "fzn")]
 	/// Parse a `.fzn` source into a [`FlatZinc`] instance using a custom
 	/// identifier interner.
 	///
 	/// Variable right-hand side declarations are resolved eagerly, so aliased
 	/// variables are omitted from the returned [`FlatZinc::variables`] map.
+	#[cfg(feature = "fzn")]
 	pub fn from_fzn_with_interner<F, E>(
 		source: impl std::io::BufRead,
 		interner: F,

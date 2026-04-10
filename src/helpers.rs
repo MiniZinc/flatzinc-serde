@@ -7,7 +7,6 @@ use std::{
 	sync::Arc,
 };
 
-#[derive(Debug, Clone)]
 /// A wrapper around an [`Arc`] that can be used as a key for collections, such
 /// as [`BTreeMap`](std::collections::BTreeMap),
 /// [`HashMap`](std::collections::HashMap), and
@@ -17,6 +16,7 @@ use std::{
 /// instances from [`Arc`] objects that share the same value will be considered
 /// equal. However, two `T` values with the same contents but different memory
 /// addresses will not be considered equal.
+#[derive(Debug, Clone)]
 pub struct ArcKey<T> {
 	/// The underlying [`Arc`] value.
 	key: Arc<T>,
