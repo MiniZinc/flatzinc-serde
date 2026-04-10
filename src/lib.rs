@@ -619,12 +619,15 @@ impl<Identifier> Array<Identifier> {
 		(ty, is_var)
 	}
 
-	/// Converts an array reference into an [`ArcKey`].
+	/// Clones this array reference into an [`ArcKey`].
 	///
 	/// This is useful when storing arrays in collections such as
 	/// [`HashMap`](std::collections::HashMap), [`HashSet`], and
 	/// [`BTreeMap`](std::collections::BTreeMap), where the key should identify
 	/// the specific parsed array object rather than its contents or `name`.
+	///
+	/// This method clones the [`Arc`] reference count and keeps the original
+	/// array reference usable by the caller.
 	///
 	/// The resulting key uses the allocation / pointer identity of this
 	/// [`Arc`]. Two arrays with the same name and equal contents will
@@ -635,8 +638,8 @@ impl<Identifier> Array<Identifier> {
 	/// identical top-level arrays are allocated only once. In those cases,
 	/// `ArcKey` is a good fit for keying collections by the canonical parsed
 	/// array object.
-	pub fn into_key(self: Arc<Self>) -> ArcKey<Self> {
-		ArcKey::new(self)
+	pub fn cloned_key(self: &Arc<Self>) -> ArcKey<Self> {
+		ArcKey::new(Arc::clone(self))
 	}
 }
 
@@ -909,12 +912,15 @@ impl Display for Type {
 }
 
 impl<Identifier> Variable<Identifier> {
-	/// Converts a variable reference into an [`ArcKey`].
+	/// Clones this variable reference into an [`ArcKey`].
 	///
 	/// This is useful when storing variables in collections such as
 	/// [`HashMap`](std::collections::HashMap), [`HashSet`], and
 	/// [`BTreeMap`](std::collections::BTreeMap), where the key should identify
 	/// the specific parsed variable object rather than its fields or `name`.
+	///
+	/// This method clones the [`Arc`] reference count and keeps the original
+	/// variable reference usable by the caller.
 	///
 	/// The resulting key uses the allocation / pointer identity of this
 	/// [`Arc`]. Two variables with the same name and equal fields will
@@ -925,7 +931,7 @@ impl<Identifier> Variable<Identifier> {
 	/// identical top-level variables are allocated only once. In those cases,
 	/// `ArcKey` is a good fit for keying collections by the canonical parsed
 	/// variable object.
-	pub fn into_key(self: Arc<Self>) -> ArcKey<Self> {
-		ArcKey::new(self)
+	pub fn cloned_key(self: &Arc<Self>) -> ArcKey<Self> {
+		ArcKey::new(Arc::clone(self))
 	}
 }
