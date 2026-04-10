@@ -26,9 +26,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build ${{ matrix.args }}
       - name: Test
@@ -53,11 +51,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
       - name: Run clippy
         run: cargo clippy --all-targets ${{ matrix.args }} -- -D warnings
 
