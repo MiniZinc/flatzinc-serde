@@ -619,11 +619,10 @@ impl<Identifier> Array<Identifier> {
 		(ty, is_var)
 	}
 
-	/// Converts an array reference into an [`ArcKey`](crate::helpers::ArcKey).
+	/// Converts an array reference into an [`ArcKey`].
 	///
 	/// This is useful when storing arrays in collections such as
-	/// [`HashMap`](std::collections::HashMap),
-	/// [`HashSet`](std::collections::HashSet), and
+	/// [`HashMap`](std::collections::HashMap), [`HashSet`], and
 	/// [`BTreeMap`](std::collections::BTreeMap), where the key should identify
 	/// the specific parsed array object rather than its contents or `name`.
 	///
@@ -910,12 +909,10 @@ impl Display for Type {
 }
 
 impl<Identifier> Variable<Identifier> {
-	/// Converts a variable reference into an
-	/// [`ArcKey`](crate::helpers::ArcKey).
+	/// Converts a variable reference into an [`ArcKey`].
 	///
 	/// This is useful when storing variables in collections such as
-	/// [`HashMap`](std::collections::HashMap),
-	/// [`HashSet`](std::collections::HashSet), and
+	/// [`HashMap`](std::collections::HashMap), [`HashSet`], and
 	/// [`BTreeMap`](std::collections::BTreeMap), where the key should identify
 	/// the specific parsed variable object rather than its fields or `name`.
 	///
