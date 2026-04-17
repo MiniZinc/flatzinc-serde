@@ -133,8 +133,8 @@ where
 								.map_err(de::Error::custom)?,
 						);
 					}
-					_ => {
-						let _ = map.next_value::<IgnoredAny>()?;
+					field => {
+						return Err(de::Error::unknown_field(field, &["id", "args"]));
 					}
 				}
 			}
@@ -165,8 +165,8 @@ where
 						}
 						args = Some(map.next_value_seed(state.seed::<ParseAnnotationArguments>())?);
 					}
-					_ => {
-						let _ = map.next_value::<IgnoredAny>()?;
+					field => {
+						return Err(de::Error::unknown_field(field, &["id", "args"]));
 					}
 				}
 			}
@@ -488,8 +488,8 @@ where
 								map.next_value_seed(self.state.seed::<ParseAnnotationArguments>())?,
 							);
 						}
-						_ => {
-							let _ = map.next_value::<IgnoredAny>()?;
+						field => {
+							return Err(de::Error::unknown_field(field, &["id", "args"]));
 						}
 					}
 				}
@@ -999,8 +999,11 @@ where
 						}
 						"defined" => defined = map.next_value()?,
 						"introduced" => introduced = map.next_value()?,
-						_ => {
-							let _ = map.next_value::<IgnoredAny>()?;
+						field => {
+							return Err(de::Error::unknown_field(
+								field,
+								&["a", "ann", "defined", "introduced"],
+							));
 						}
 					}
 				}
@@ -1136,8 +1139,11 @@ where
 						"ann" => {
 							ann = map.next_value_seed(self.state.seed::<ParseAnnotations>())?;
 						}
-						_ => {
-							let _ = map.next_value::<IgnoredAny>()?;
+						field => {
+							return Err(de::Error::unknown_field(
+								field,
+								&["id", "args", "defines", "ann"],
+							));
 						}
 					}
 				}
@@ -1424,8 +1430,11 @@ where
 						"ann" => {
 							ann = map.next_value_seed(self.state.seed::<ParseAnnotations>())?;
 						}
-						_ => {
-							let _ = map.next_value::<IgnoredAny>()?;
+						field => {
+							return Err(de::Error::unknown_field(
+								field,
+								&["method", "objective", "ann"],
+							));
 						}
 					}
 				}
@@ -1503,7 +1512,6 @@ where
 			{
 				let mut ty = None;
 				let mut domain = None;
-				let mut value = None;
 				let mut ann = Vec::new();
 				let mut defined = false;
 				let mut introduced = false;
@@ -1522,19 +1530,16 @@ where
 							}
 							domain = Some(map.next_value::<VariableDomain>()?);
 						}
-						"rhs" => {
-							if value.is_some() {
-								return Err(de::Error::duplicate_field("rhs"));
-							}
-							value = Some(map.next_value_seed(self.state.seed::<ParseLiteral>())?);
-						}
 						"ann" => {
 							ann = map.next_value_seed(self.state.seed::<ParseAnnotations>())?;
 						}
 						"defined" => defined = map.next_value()?,
 						"introduced" => introduced = map.next_value()?,
-						_ => {
-							let _ = map.next_value::<IgnoredAny>()?;
+						field => {
+							return Err(de::Error::unknown_field(
+								field,
+								&["type", "domain", "ann", "defined", "introduced"],
+							));
 						}
 					}
 				}
@@ -1544,7 +1549,6 @@ where
 						.ok_or_else(|| de::Error::missing_field("type"))?
 						.into_type(domain)
 						.map_err(de::Error::custom)?,
-					value,
 					ann,
 					defined,
 					introduced,

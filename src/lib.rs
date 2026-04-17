@@ -45,6 +45,12 @@
 //! # }
 //! ```
 //!
+//! When deserializing FlatZinc JSON, this crate rejects unknown fields on inner
+//! FlatZinc objects such as variables, arrays, constraints, solve items, and
+//! annotation-call objects. Unknown fields on the outer top-level wrapper
+//! object are ignored to preserve some forward compatibility for envelope
+//! metadata.
+//!
 //! The older textual `.fzn` format is also supported when the `fzn` feature is
 //! enabled:
 //!
@@ -296,11 +302,6 @@ pub struct Constraint<Identifier = String> {
 /// FlatZinc is (generally) a format produced by the MiniZinc compiler as a
 /// result of instantiating the parameter variables of a MiniZinc model and
 /// generating a solver-specific equisatisfiable model.
-///
-/// During parsing, any variable right-hand side declarations are resolved
-/// eagerly. The resulting public model stores only non-aliased variables, while
-/// references in constraints, arrays, and objectives are rewritten to the
-/// resolved literals.
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[derive(Clone, PartialEq, Debug)]
 pub struct FlatZinc<Identifier = String> {
@@ -425,10 +426,6 @@ pub enum Type {
 }
 
 /// The definition of a decision variable
-///
-/// Any right-hand side declarations from the FlatZinc input are resolved during
-/// parsing and are therefore not stored on the public type. Standalone JSON
-/// deserialization of [`Variable`] values does not accept an `rhs` field.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Variable<Identifier = String> {
 	/// The public name of the decision variable.
@@ -601,24 +598,6 @@ impl<Identifier: Display> Display for Argument<Identifier> {
 }
 
 impl<Identifier> Array<Identifier> {
-	/// Heuristic to determine the type of the array
-	fn determine_type(&self) -> (&str, bool) {
-		let ty = match self.contents.first().unwrap() {
-			Literal::Int(_) => "int",
-			Literal::Float(_) => "float",
-			Literal::Variable(var) => return (var.ty.base_name(), true),
-			Literal::Bool(_) => "bool",
-			Literal::IntSet(_) => "set of int",
-			Literal::FloatSet(_) => "set of float",
-			Literal::String(_) => "string",
-		};
-		let is_var = self
-			.contents
-			.iter()
-			.any(|lit| matches!(lit, Literal::Variable(_)));
-		(ty, is_var)
-	}
-
 	/// Clones this array reference into an [`ArcKey`].
 	///
 	/// This is useful when storing arrays in collections such as
@@ -640,6 +619,24 @@ impl<Identifier> Array<Identifier> {
 	/// array object.
 	pub fn cloned_key(self: &Arc<Self>) -> ArcKey<Self> {
 		ArcKey::new(Arc::clone(self))
+	}
+
+	/// Heuristic to determine the type of the array
+	fn determine_type(&self) -> (&str, bool) {
+		let ty = match self.contents.first().unwrap() {
+			Literal::Int(_) => "int",
+			Literal::Float(_) => "float",
+			Literal::Variable(var) => return (var.ty.base_name(), true),
+			Literal::Bool(_) => "bool",
+			Literal::IntSet(_) => "set of int",
+			Literal::FloatSet(_) => "set of float",
+			Literal::String(_) => "string",
+		};
+		let is_var = self
+			.contents
+			.iter()
+			.any(|lit| matches!(lit, Literal::Variable(_)));
+		(ty, is_var)
 	}
 }
 
@@ -669,10 +666,11 @@ impl<Identifier> FlatZinc<Identifier>
 where
 	Identifier: Clone + Debug,
 {
-	/// Deserialize a FlatZinc JSON value using a custom identifier interner.
+	/// Deserialize a FlatZinc JSON value using a custom identifier interner,
+	/// used for constraint and annotation identifiers.
 	///
-	/// Variable right-hand side declarations are resolved eagerly, so aliased
-	/// variables are omitted from the returned [`FlatZinc::variables`] map.
+	/// Unknown fields on inner FlatZinc objects are rejected. Unknown fields on
+	/// the outer top-level JSON object are ignored.
 	#[cfg(feature = "serde")]
 	pub fn deserialize_with_interner<'de, D, F, E>(
 		deserializer: D,
@@ -702,10 +700,7 @@ where
 	}
 
 	/// Parse a `.fzn` source into a [`FlatZinc`] instance using a custom
-	/// identifier interner.
-	///
-	/// Variable right-hand side declarations are resolved eagerly, so aliased
-	/// variables are omitted from the returned [`FlatZinc::variables`] map.
+	/// identifier interner, used for constraint and annotation identifiers.
 	#[cfg(feature = "fzn")]
 	pub fn from_fzn_with_interner<F, E>(
 		source: impl std::io::BufRead,
