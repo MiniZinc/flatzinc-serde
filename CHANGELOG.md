@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [**breaking**] Change the default implementation of `variables` and `arrays` field of `FlatZinc` to be `std::collections::HashMap`.
 - Allow the usage of stateful interners for `Identifier` using `FlatZinc::deserialize_with_interner` and `FlatZinc::from_fzn_with_interner`.
 - [**breaking**] Remove the `value` field from `Variable`.
-  Any right-hand side value is now resolved during parsing.
+  MiniZinc 2.9.6 and later already resolve declaration right-hand sides before emitting FlatZinc, so this crate no longer accepts or exposes those values through `Variable`.
 - [**breaking**] `FlatZinc` now uses `Arc<Variable>` and `Arc<Array>` to represent variable reference in `Literal`.
   This allowed the removal of the `Argument` type, as inline arrays are now represented as `Array` types without names.
 	The `variables` and `arrays` attributes of `FlatZinc` are now `Vec<Arc<_>>`.

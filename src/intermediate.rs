@@ -221,8 +221,6 @@ pub(crate) struct SolveObjective<Identifier> {
 pub(crate) struct Variable<Identifier> {
 	/// Variable domain/type information.
 	pub(crate) ty: Type,
-	/// Optional right-hand side preserved until linking.
-	pub(crate) value: Option<Literal>,
 	/// Variable annotations.
 	pub(crate) ann: Vec<Annotation<Identifier>>,
 	/// Whether the variable is defined by a constraint.
@@ -469,6 +467,40 @@ where
 			.collect()
 	}
 
+	/// Resolve one model-level name into its linked argument form.
+	fn resolve_name(&mut self, name: NameId) -> Result<crate::Argument<Identifier>, LinkError> {
+		if let Some(arg) = &self.resolved[name.index()] {
+			return Ok(arg.clone());
+		}
+		let entry = self.names.extract_entry(name);
+		let arg = match entry.declaration {
+			Declaration::Variable(variable) => {
+				crate::Argument::Literal(self.create_variable(entry.name, variable)?)
+			}
+			Declaration::Array(array) => self.create_array(entry.name, array)?,
+			Declaration::Uninit => {
+				self.names.entries[name.index()] = entry;
+				return Err(LinkError::UnknownReference(self.names.to_owned(name)));
+			}
+		};
+		self.resolved[name.index()] = Some(arg.clone());
+		Ok(arg)
+	}
+
+	/// Resolve one model-level name into a linked literal.
+	fn resolve_literal_name(
+		&mut self,
+		name: NameId,
+	) -> Result<crate::Literal<Identifier>, LinkError> {
+		match self.resolve_name(name)? {
+			crate::Argument::Literal(lit) => Ok(lit),
+			crate::Argument::ArrayNamed(_) => {
+				Err(LinkError::NestedArray(self.names.to_owned(name)))
+			}
+			crate::Argument::Array(_) => unreachable!("resolved names never produce inline arrays"),
+		}
+	}
+
 	/// Link one intermediate argument.
 	fn link_argument(&mut self, arg: Argument) -> Result<crate::Argument<Identifier>, LinkError> {
 		Ok(match arg {
@@ -477,28 +509,7 @@ where
 					.map(|lit| self.link_literal(lit))
 					.collect::<Result<Vec<_>, _>>()?,
 			),
-			Argument::Literal(Literal::Reference(name)) => {
-				if let Some(arg) = &self.resolved[name.index()] {
-					return Ok(arg.clone());
-				}
-				let entry = self.names.extract_entry(name);
-				let arg = match entry.declaration {
-					Declaration::Variable(variable) => {
-						crate::Argument::Literal(if let Some(value) = variable.value {
-							self.link_literal(value)?
-						} else {
-							self.create_variable(entry.name, variable)?
-						})
-					}
-					Declaration::Array(array) => self.create_array(entry.name, array)?,
-					Declaration::Uninit => {
-						self.names.entries[name.index()] = entry;
-						return Err(LinkError::UnknownReference(self.names.to_owned(name)));
-					}
-				};
-				self.resolved[name.index()] = Some(arg.clone());
-				arg
-			}
+			Argument::Literal(Literal::Reference(name)) => self.resolve_name(name)?,
 			Argument::Literal(lit) => crate::Argument::Literal(self.link_literal(lit)?),
 		})
 	}
@@ -530,33 +541,7 @@ where
 		Ok(match literal {
 			Literal::Int(i) => crate::Literal::Int(i),
 			Literal::Float(f) => crate::Literal::Float(f),
-			Literal::Reference(name) => {
-				if let Some(arg) = &self.resolved[name.index()] {
-					let crate::Argument::Literal(lit) = arg else {
-						return Err(LinkError::NestedArray(self.names.to_owned(name)));
-					};
-					return Ok(lit.clone());
-				}
-				let entry = self.names.extract_entry(name);
-				let lit = match entry.declaration {
-					Declaration::Variable(variable) => {
-						if let Some(value) = variable.value {
-							self.link_literal(value)?
-						} else {
-							self.create_variable(entry.name, variable)?
-						}
-					}
-					Declaration::Array(_) => {
-						return Err(LinkError::NestedArray(entry.name.into_string()));
-					}
-					Declaration::Uninit => {
-						self.names.entries[name.index()] = entry;
-						return Err(LinkError::UnknownReference(self.names.to_owned(name)));
-					}
-				};
-				self.resolved[name.index()] = Some(crate::Argument::Literal(lit.clone()));
-				lit
-			}
+			Literal::Reference(name) => self.resolve_literal_name(name)?,
 			Literal::Bool(b) => crate::Literal::Bool(b),
 			Literal::IntSet(ranges) => crate::Literal::IntSet(ranges),
 			Literal::FloatSet(ranges) => crate::Literal::FloatSet(ranges),
@@ -578,15 +563,13 @@ where
 	/// Link the named reference if possible, returning `None` if the name does
 	/// not result in a variable or named array in the resulting model.
 	fn link_name(&mut self, name: NameId) -> Result<Option<NamedRef<Identifier>>, LinkError> {
-		Ok(
-			match self.link_argument(Argument::Literal(Literal::Reference(name)))? {
-				crate::Argument::Literal(crate::Literal::Variable(var)) => {
-					Some(NamedRef::Variable(var))
-				}
-				crate::Argument::ArrayNamed(arr) => Some(NamedRef::Array(arr)),
-				_ => None,
-			},
-		)
+		Ok(match self.resolve_name(name)? {
+			crate::Argument::Literal(crate::Literal::Variable(var)) => {
+				Some(NamedRef::Variable(var))
+			}
+			crate::Argument::ArrayNamed(arr) => Some(NamedRef::Array(arr)),
+			crate::Argument::Literal(_) | crate::Argument::Array(_) => None,
+		})
 	}
 
 	/// Create linker state from an intermediate model.

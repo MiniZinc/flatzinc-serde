@@ -177,7 +177,6 @@ where
 /// ```bnf
 /// <item> ::= <array-item>
 ///          | <var-decl-item>
-///          | <par-decl-item>
 /// ```
 fn declaration<'a, Identifier, F, E>(
 	input: &mut Stream<'a, Identifier, F>,
@@ -190,7 +189,6 @@ where
 	alt((
 		array_item.map(|(name, arr, output)| (name, Declaration::Array(arr), output)),
 		variable_declaration.map(|(name, var, output)| (name, Declaration::Variable(var), output)),
-		parameter_item.map(|(name, var)| (name, Declaration::Variable(var), false)),
 	))
 	.parse_next(input)
 }
@@ -227,33 +225,6 @@ fn map_parse_error<Identifier, F>(
 		|| FznParseError::SyntaxError(error.to_string()),
 		|error| error.into(),
 	)
-}
-
-/// Parse a parameter declaration item.
-///
-/// ```bnf
-/// <par-decl-item> ::= <par-type> ":" <identifier> "=" <basic-expr> ";"
-/// ```
-fn parameter_item<'a, Identifier, F>(
-	input: &mut Stream<'a, Identifier, F>,
-) -> Result<(NameId, Variable<Identifier>)> {
-	let (ty, _, (name, literal), _) = (
-		basic_parameter_type,
-		token(":"),
-		separated_pair(token(identifier), token("="), token(literal)),
-		token(";"),
-	)
-		.parse_next(input)?;
-	Ok((
-		input.state.intern_name(name),
-		Variable {
-			ty,
-			value: Some(literal),
-			ann: Vec::new(),
-			defined: false,
-			introduced: false,
-		},
-	))
 }
 
 /// Parse the `.fzn` source to a [`FlatZinc`] instance.
@@ -582,8 +553,7 @@ where
 /// stream.
 ///
 /// ```bnf
-/// <var-decl-item> ::= "var" <var-type> ":" <identifier>
-///                     <annotations> ["=" <basic-expr>] ";"
+/// <var-decl-item> ::= "var" <var-type> ":" <identifier> <annotations> ";"
 /// ```
 fn variable_declaration<'a, Identifier, F, E>(
 	input: &mut Stream<'a, Identifier, F>,
@@ -593,13 +563,12 @@ where
 	F: FnMut(&str) -> std::result::Result<Identifier, E>,
 	E: Display,
 {
-	let (_, ty, _, name, (flags, ann), value, _) = (
+	let (_, ty, _, name, (flags, ann), _) = (
 		token("var"),
 		token(basic_variable_type),
 		token(":"),
 		token(identifier),
 		variable_annotations,
-		opt(preceded(token("="), token(literal))),
 		token(";"),
 	)
 		.parse_next(input)?;
@@ -609,7 +578,6 @@ where
 		name,
 		Variable {
 			ty,
-			value,
 			ann,
 			defined: flags.defined,
 			introduced: flags.introduced,
@@ -654,8 +622,7 @@ mod tests {
 	use crate::{
 		FlatZinc, FznParseError, LinkError, NamedRef, Type,
 		fzn::{
-			Stream, array_item, constraint, parameter_item, predicate_item, solve_objective,
-			variable_declaration,
+			Stream, array_item, constraint, predicate_item, solve_objective, variable_declaration,
 		},
 		intermediate::{
 			Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Argument, Array,
@@ -664,24 +631,11 @@ mod tests {
 	};
 
 	#[test]
-	fn aliases_are_resolved_when_linking_public_ast() {
-		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
-			"int: y = 5;\nvar int: x;\nconstraint int_eq(y, x);\nsolve satisfy;",
-		))
-		.expect("failed to parse model with parameter alias");
+	fn scalar_parameter_declarations_are_rejected() {
+		let err = FlatZinc::<String>::from_fzn(Cursor::new("int: y = 5;\nsolve satisfy;"))
+			.expect_err("expected scalar parameter declaration to be rejected");
 
-		assert_eq!(fzn.variables.len(), 1);
-		assert_eq!(fzn.variables[0].name, "x");
-		assert_eq!(
-			fzn.constraints[0].args[0],
-			crate::Argument::Literal(crate::Literal::Int(5))
-		);
-		let crate::Argument::Literal(crate::Literal::Variable(variable)) =
-			&fzn.constraints[0].args[1]
-		else {
-			unreachable!();
-		};
-		assert_eq!(variable.name, "x");
+		assert!(matches!(err, FznParseError::SyntaxError(_)));
 	}
 
 	pub(crate) fn annotation_identifier(
@@ -881,7 +835,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(None),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: true,
@@ -897,51 +850,11 @@ mod tests {
 	}
 
 	#[test]
-	fn parameter_items_are_parsed() {
-		let (actual, names) = parse_with_names(parameter_item, "int: some_param = 5;");
-		assert_eq!(
-			actual,
-			(
-				name_id(&names, "some_param"),
-				Variable {
-					ty: Type::Int(None),
-					value: Some(Literal::Int(5)),
-					ann: vec![],
-					defined: false,
-					introduced: false,
-				},
-			),
-		);
+	fn scalar_variable_assignments_are_rejected() {
+		let err = FlatZinc::<String>::from_fzn(Cursor::new("var int: x = 1;\nsolve satisfy;"))
+			.expect_err("expected scalar variable assignment to be rejected");
 
-		let (actual, names) = parse_with_names(parameter_item, "bool: some_param = true;");
-		assert_eq!(
-			actual,
-			(
-				name_id(&names, "some_param"),
-				Variable {
-					ty: Type::Bool,
-					value: Some(Literal::Bool(true)),
-					ann: vec![],
-					defined: false,
-					introduced: false,
-				},
-			),
-		);
-
-		let (actual, names) = parse_with_names(parameter_item, "float: some_param = 35.3;");
-		assert_eq!(
-			actual,
-			(
-				name_id(&names, "some_param"),
-				Variable {
-					ty: Type::Float(None),
-					value: Some(Literal::Float(35.3)),
-					ann: vec![],
-					defined: false,
-					introduced: false,
-				},
-			),
-		);
+		assert!(matches!(err, FznParseError::SyntaxError(_)));
 	}
 
 	#[test]
@@ -1278,7 +1191,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(None),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: true,
@@ -1295,7 +1207,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(None),
-					value: None,
 					ann: vec![],
 					defined: true,
 					introduced: false,
@@ -1314,7 +1225,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Bool,
-					value: None,
 					ann: vec![],
 					defined: true,
 					introduced: true,
@@ -1333,7 +1243,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Float(Some(RangeList::from(1.0..=5.5))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1352,7 +1261,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(Some(RangeList::from(1..=5))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1368,7 +1276,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(Some(RangeList::from_iter([1..=1, 4..=4, 6..=6]))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1387,7 +1294,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::IntSet(Some(RangeList::from(1..=5))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1403,7 +1309,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::IntSet(Some(RangeList::from_iter([1..=1, 3..=3]))),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1422,7 +1327,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(None),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1438,7 +1342,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Float(None),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1454,7 +1357,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::IntSet(None),
-					value: None,
 					ann: vec![],
 					defined: false,
 					introduced: false,
@@ -1473,7 +1375,6 @@ mod tests {
 				name_id(&names, "x"),
 				Variable {
 					ty: Type::Int(Some(RangeList::from(1..=5))),
-					value: None,
 					ann: vec![Annotation::Atom("mip".to_owned())],
 					defined: false,
 					introduced: false,

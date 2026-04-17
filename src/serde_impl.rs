@@ -295,16 +295,6 @@ mod tests {
 		FlatZinc, Literal, Method, NamedRef, SolveObjective, Type, Variable,
 	};
 
-	fn find_array<'a, Identifier>(
-		fzn: &'a FlatZinc<Identifier>,
-		name: &str,
-	) -> &'a Arc<Array<Identifier>> {
-		fzn.arrays
-			.iter()
-			.find(|array| array.name == name)
-			.unwrap_or_else(|| panic!("missing array `{name}`"))
-	}
-
 	#[test]
 	fn test_default_flatzinc() {
 		let fzn = FlatZinc::<String>::default();
@@ -355,76 +345,23 @@ mod tests {
 	}
 
 	#[test]
-	fn test_deserialize_with_interner_resolves_aliases() {
+	fn test_deserialize_with_interner_rejects_variable_rhs() {
 		let json = r#"{
 			"variables": {
-				"y": {"type": "int", "rhs": 5},
-				"x": {"type": "int"}
+				"y": {"type": "int", "rhs": 5}
 			},
-			"constraints": [
-				{"id": "int_eq", "args": ["y", "x"]}
-			],
+			"constraints": [],
 			"solve": {"method": "satisfy"},
 			"version": "1.0"
 		}"#;
 
-		let fzn =
+		let err =
 			FlatZinc::<String>::deserialize_with_interner(&mut Deserializer::from_str(json), |s| {
 				Ok::<_, Infallible>(s.into())
 			})
-			.unwrap();
+			.expect_err("expected variable rhs to be rejected");
 
-		assert_eq!(fzn.variables.len(), 1);
-		assert!(fzn.variables.iter().all(|variable| variable.name != "y"));
-		assert_eq!(
-			fzn.constraints[0].args[0],
-			Argument::Literal(Literal::Int(5))
-		);
-		let Argument::Literal(Literal::Variable(variable)) = &fzn.constraints[0].args[1] else {
-			unreachable!()
-		};
-		assert_eq!(variable.name, "x");
-	}
-
-	#[test]
-	fn test_deserialize_with_interner_resolves_aliases_when_variables_come_late() {
-		let json = r#"{
-			"constraints": [
-				{"id": "int_eq", "args": ["y", "x"]}
-			],
-			"arrays": {
-				"ys": {"a": ["y", 1]}
-			},
-			"output": ["ys", "x"],
-			"solve": {"method": "satisfy"},
-			"variables": {
-				"y": {"type": "int", "rhs": 5},
-				"x": {"type": "int"}
-			},
-			"version": "1.0"
-		}"#;
-
-		let fzn =
-			FlatZinc::<String>::deserialize_with_interner(&mut Deserializer::from_str(json), |s| {
-				Ok::<_, Infallible>(s.into())
-			})
-			.unwrap();
-
-		let ys = find_array(&fzn, "ys");
-		assert_eq!(ys.contents, vec![Literal::Int(5), Literal::Int(1)]);
-		assert_eq!(
-			fzn.constraints[0].args[0],
-			Argument::Literal(Literal::Int(5))
-		);
-
-		let Argument::Literal(Literal::Variable(variable)) = &fzn.constraints[0].args[1] else {
-			unreachable!()
-		};
-		assert_eq!(variable.name, "x");
-		assert_eq!(
-			fzn.output.iter().map(NamedRef::name).collect::<Vec<_>>(),
-			vec!["ys", "x"]
-		);
+		assert!(err.to_string().contains("unknown field `rhs`"));
 	}
 
 	#[test]

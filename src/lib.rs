@@ -45,6 +45,12 @@
 //! # }
 //! ```
 //!
+//! When deserializing FlatZinc JSON, this crate rejects unknown fields on inner
+//! FlatZinc objects such as variables, arrays, constraints, solve items, and
+//! annotation-call objects. Unknown fields on the outer top-level wrapper
+//! object are ignored to preserve some forward compatibility for envelope
+//! metadata.
+//!
 //! The older textual `.fzn` format is also supported when the `fzn` feature is
 //! enabled:
 //!
@@ -297,10 +303,7 @@ pub struct Constraint<Identifier = String> {
 /// result of instantiating the parameter variables of a MiniZinc model and
 /// generating a solver-specific equisatisfiable model.
 ///
-/// During parsing, any variable right-hand side declarations are resolved
-/// eagerly. The resulting public model stores only non-aliased variables, while
-/// references in constraints, arrays, and objectives are rewritten to the
-/// resolved literals.
+/// During parsing, variables are always represented as standalone declarations.
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[derive(Clone, PartialEq, Debug)]
 pub struct FlatZinc<Identifier = String> {
@@ -426,8 +429,7 @@ pub enum Type {
 
 /// The definition of a decision variable
 ///
-/// Any right-hand side declarations from the FlatZinc input are resolved during
-/// parsing and are therefore not stored on the public type. Standalone JSON
+/// Scalar FlatZinc variables are standalone declarations. Standalone JSON
 /// deserialization of [`Variable`] values does not accept an `rhs` field.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Variable<Identifier = String> {
@@ -669,10 +671,11 @@ impl<Identifier> FlatZinc<Identifier>
 where
 	Identifier: Clone + Debug,
 {
-	/// Deserialize a FlatZinc JSON value using a custom identifier interner.
+	/// Deserialize a FlatZinc JSON value using a custom identifier interner,
+	/// used for constraint and annotation identifiers.
 	///
-	/// Variable right-hand side declarations are resolved eagerly, so aliased
-	/// variables are omitted from the returned [`FlatZinc::variables`] map.
+	/// Unknown fields on inner FlatZinc objects are rejected. Unknown fields on
+	/// the outer top-level JSON object are ignored.
 	#[cfg(feature = "serde")]
 	pub fn deserialize_with_interner<'de, D, F, E>(
 		deserializer: D,
@@ -702,10 +705,7 @@ where
 	}
 
 	/// Parse a `.fzn` source into a [`FlatZinc`] instance using a custom
-	/// identifier interner.
-	///
-	/// Variable right-hand side declarations are resolved eagerly, so aliased
-	/// variables are omitted from the returned [`FlatZinc::variables`] map.
+	/// identifier interner, used for constraint and annotation identifiers.
 	#[cfg(feature = "fzn")]
 	pub fn from_fzn_with_interner<F, E>(
 		source: impl std::io::BufRead,
