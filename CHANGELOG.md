@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## unreleased
 
+## [0.5.0](https://github.com/MiniZinc/flatzinc-serde/compare/v0.4.4...v0.5.0) - 2026-04-17
+
 ### Added
 
 - Add support for parsing `.fzn` files when enabling the `fzn` feature.
