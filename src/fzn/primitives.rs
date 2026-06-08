@@ -139,7 +139,7 @@ pub(super) fn interval_set<'source, Identifier, F, T>(
 	elem_parser: impl Parser<Stream<'source, Identifier, F>, T, ContextError> + Copy,
 ) -> impl Parser<Stream<'source, Identifier, F>, RangeList<T>, ContextError>
 where
-	T: PartialOrd + Copy + 'static,
+	T: PartialOrd + Copy + rangelist::Adjacent,
 {
 	move |input: &mut Stream<'source, Identifier, F>| {
 		separated_pair(token(elem_parser), token(".."), token(elem_parser))
@@ -210,13 +210,13 @@ pub(super) fn set<'source, Identifier, F, T>(
 	elem_parser: impl Parser<Stream<'source, Identifier, F>, T, ContextError> + Copy,
 ) -> impl Parser<Stream<'source, Identifier, F>, RangeList<T>, ContextError>
 where
-	T: PartialOrd + Copy + 'static,
+	T: PartialOrd + Copy + rangelist::Adjacent,
 {
 	fn set_literal<'source, Identifier, F, T>(
 		elem_parser: impl Parser<Stream<'source, Identifier, F>, T, ContextError> + Copy,
 	) -> impl Parser<Stream<'source, Identifier, F>, RangeList<T>, ContextError>
 	where
-		T: PartialOrd + Copy + 'static,
+		T: PartialOrd + Copy + rangelist::Adjacent,
 	{
 		move |input: &mut Stream<'source, Identifier, F>| {
 			delimited_list("{", elem_parser, "}")

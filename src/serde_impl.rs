@@ -57,7 +57,7 @@ pub(crate) enum VariableDomain {
 pub(crate) fn deserialize_set<
 	'de,
 	D: Deserializer<'de>,
-	E: Copy + Deserialize<'de> + PartialOrd + 'static,
+	E: Copy + Deserialize<'de> + PartialOrd + 'static + rangelist::Adjacent,
 >(
 	deserializer: D,
 ) -> Result<RangeList<E>, D::Error> {
