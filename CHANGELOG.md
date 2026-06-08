@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## unreleased
 
+## [0.5.1](https://github.com/MiniZinc/flatzinc-serde/compare/v0.5.0...v0.5.1) - 2026-06-08
+
+### Other
+
+- update dependencies
+
 ## [0.5.0](https://github.com/MiniZinc/flatzinc-serde/compare/v0.4.4...v0.5.0) - 2026-04-17
 
 ### Added
