@@ -625,8 +625,8 @@ mod tests {
 			Stream, array_item, constraint, predicate_item, solve_objective, variable_declaration,
 		},
 		intermediate::{
-			Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Argument, Array,
-			Constraint, Literal, Method, NameId, NameStore, ParserState, SolveObjective, Variable,
+			Annotation, AnnotationCall, AnnotationLiteral, Argument, Array, Constraint, Literal,
+			Method, NameId, NameStore, ParserState, SolveObjective, Variable,
 		},
 	};
 
@@ -634,7 +634,7 @@ mod tests {
 		names: &NameStore<String>,
 		name: &str,
 	) -> AnnotationLiteral<String> {
-		AnnotationLiteral::Reference(name_id(names, name))
+		AnnotationLiteral::Literal(Literal::Reference(name_id(names, name)))
 	}
 
 	#[test]
@@ -991,19 +991,62 @@ mod tests {
 			vec![crate::Annotation::Call(crate::AnnotationCall {
 				id: "int_search".to_owned(),
 				args: vec![
-					crate::AnnotationArgument::Array(vec![crate::AnnotationLiteral::Variable(
-						Arc::downgrade(&fzn.variables[0]),
+					crate::Argument::Array(vec![crate::AnnotationLiteral::Literal(
+						crate::Literal::Variable(Arc::clone(&fzn.variables[0])),
 					)]),
-					crate::AnnotationArgument::Literal(crate::AnnotationLiteral::Annotation(
+					crate::Argument::Literal(crate::AnnotationLiteral::Annotation(
 						crate::Annotation::Atom("input_order".to_owned()),
 					)),
-					crate::AnnotationArgument::Literal(crate::AnnotationLiteral::Annotation(
+					crate::Argument::Literal(crate::AnnotationLiteral::Annotation(
 						crate::Annotation::Atom("indomain_min".to_owned()),
 					)),
-					crate::AnnotationArgument::Literal(crate::AnnotationLiteral::Annotation(
+					crate::Argument::Literal(crate::AnnotationLiteral::Annotation(
 						crate::Annotation::Atom("complete".to_owned()),
 					)),
 				],
+			})]
+		);
+	}
+
+	#[test]
+	fn self_referential_annotation_is_dropped() {
+		let fzn =
+			FlatZinc::<String>::from_fzn(Cursor::new("var int: x :: foo(x);\nsolve satisfy;"))
+				.expect("failed to parse self-referential annotation");
+		assert!(
+			fzn.variables[0].ann.is_empty(),
+			"self-referential annotation should be dropped, got {:?}",
+			fzn.variables[0].ann
+		);
+	}
+
+	#[test]
+	fn cyclic_annotation_keeps_non_cyclic_direction() {
+		let fzn = FlatZinc::<String>::from_fzn(Cursor::new(
+			"var int: x :: foo(y);\nvar int: y :: foo(x);\nsolve satisfy;",
+		))
+		.expect("failed to parse mutually referential annotations");
+		let x = fzn.variables.iter().find(|v| v.name == "x").unwrap();
+		let y = fzn.variables.iter().find(|v| v.name == "y").unwrap();
+		// Exactly one direction is kept (whichever variable is resolved first);
+		// the other would close the reference cycle and is silently dropped.
+		let (kept, dropped, target) = if x.ann.is_empty() {
+			(y, x, x)
+		} else {
+			(x, y, y)
+		};
+		assert!(
+			dropped.ann.is_empty(),
+			"cyclic annotation should be dropped, got {:?}",
+			dropped.ann
+		);
+		assert_eq!(
+			kept.ann,
+			vec![crate::Annotation::Call(crate::AnnotationCall {
+				id: "foo".to_owned(),
+				args: vec![crate::Argument::Literal(crate::AnnotationLiteral::Literal(
+					crate::Literal::Variable(Arc::clone(target))
+				))],
 			})]
 		);
 	}
@@ -1030,17 +1073,14 @@ mod tests {
 				ann: vec![Annotation::Call(AnnotationCall {
 					id: "int_search".to_owned(),
 					args: vec![
-						AnnotationArgument::Array(vec![
+						Argument::Array(vec![
 							annotation_identifier(&names, "x"),
 							annotation_identifier(&names, "y"),
 							annotation_identifier(&names, "z"),
 						]),
-						AnnotationArgument::Literal(annotation_identifier(&names, "first_fail")),
-						AnnotationArgument::Literal(annotation_identifier(
-							&names,
-							"indomain_split",
-						)),
-						AnnotationArgument::Literal(annotation_identifier(&names, "complete")),
+						Argument::Literal(annotation_identifier(&names, "first_fail")),
+						Argument::Literal(annotation_identifier(&names, "indomain_split",)),
+						Argument::Literal(annotation_identifier(&names, "complete")),
 					],
 				})],
 			},
@@ -1093,10 +1133,10 @@ mod tests {
 				ann: vec![Annotation::Call(AnnotationCall {
 					id: "int_search".to_owned(),
 					args: vec![
-						AnnotationArgument::Literal(annotation_identifier(&names, "xs",)),
-						AnnotationArgument::Literal(annotation_identifier(&names, "input_order",)),
-						AnnotationArgument::Literal(annotation_identifier(&names, "indomain_min",)),
-						AnnotationArgument::Literal(annotation_identifier(&names, "complete",)),
+						Argument::Literal(annotation_identifier(&names, "xs",)),
+						Argument::Literal(annotation_identifier(&names, "input_order",)),
+						Argument::Literal(annotation_identifier(&names, "indomain_min",)),
+						Argument::Literal(annotation_identifier(&names, "complete",)),
 					],
 				})],
 			},
@@ -1113,17 +1153,14 @@ mod tests {
 				ann: vec![Annotation::Call(AnnotationCall {
 					id: "int_search".to_owned(),
 					args: vec![
-						AnnotationArgument::Array(vec![
+						Argument::Array(vec![
 							annotation_identifier(&names, "x"),
 							annotation_identifier(&names, "y"),
 							annotation_identifier(&names, "z"),
 						]),
-						AnnotationArgument::Literal(annotation_identifier(&names, "first_fail",)),
-						AnnotationArgument::Literal(annotation_identifier(
-							&names,
-							"indomain_split",
-						)),
-						AnnotationArgument::Literal(annotation_identifier(&names, "complete",)),
+						Argument::Literal(annotation_identifier(&names, "first_fail",)),
+						Argument::Literal(annotation_identifier(&names, "indomain_split",)),
+						Argument::Literal(annotation_identifier(&names, "complete",)),
 					],
 				})],
 			},

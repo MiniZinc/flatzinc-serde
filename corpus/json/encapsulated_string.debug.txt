@@ -11,8 +11,10 @@ FlatZinc {
                     id: "myAnn",
                     args: [
                         Literal(
-                            String(
-                                "my string",
+                            Literal(
+                                String(
+                                    "my string",
+                                ),
                             ),
                         ),
                     ],

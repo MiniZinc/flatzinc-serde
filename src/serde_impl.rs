@@ -6,7 +6,7 @@ pub(crate) mod seeded;
 use std::{
 	fmt::{Debug, Display},
 	ops::Deref,
-	sync::{Arc, Weak},
+	sync::Arc,
 };
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
@@ -93,18 +93,6 @@ pub(crate) fn serialize_array_map<S: Serializer, Identifier: Serialize>(
 	state.end()
 }
 
-/// Serialize a [`Weak<Array>`] reference, upgrading it to an [`Arc<Array>`]
-/// before serializing it using its name, if present, or its contents otherwise.
-pub(crate) fn serialize_array_weak<S: Serializer, Identifier>(
-	array: &Weak<Array<Identifier>>,
-	serializer: S,
-) -> Result<S::Ok, S::Error> {
-	let array = array.upgrade().ok_or_else(|| {
-		serde::ser::Error::custom("dangling weak array reference in annotation literal")
-	})?;
-	serialize_array_arc(&array, serializer)
-}
-
 /// Serialization function to be used for the encapsulation of set literals
 /// required by the FlatZinc serialization format
 pub(crate) fn serialize_encapsulate_set<E: PartialOrd + Serialize + Copy, S: Serializer>(
@@ -167,18 +155,6 @@ pub(crate) fn serialize_variable_map<S: Serializer, Identifier: Serialize>(
 		state.serialize_entry(&var.name, var.deref())?;
 	}
 	state.end()
-}
-
-/// Serialize a [`Weak<Variable>`] reference, upgrading it to an
-/// [`Arc<Variable>`] before serializing it using its name.
-pub(crate) fn serialize_variable_weak<S: Serializer, Identifier>(
-	variable: &Weak<Variable<Identifier>>,
-	serializer: S,
-) -> Result<S::Ok, S::Error> {
-	let variable = variable.upgrade().ok_or_else(|| {
-		serde::ser::Error::custom("dangling weak variable reference in annotation literal")
-	})?;
-	serialize_variable_arc(&variable, serializer)
 }
 
 impl<'de, I, E> Deserialize<'de> for FlatZinc<I>
@@ -291,8 +267,8 @@ mod tests {
 	use ustr::Ustr;
 
 	use crate::{
-		Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Argument, Array,
-		FlatZinc, Literal, Method, NamedRef, SolveObjective, Type, Variable,
+		Annotation, AnnotationCall, AnnotationLiteral, Argument, Array, FlatZinc, Literal, Method,
+		NamedRef, SolveObjective, Type, Variable,
 	};
 
 	#[test]
@@ -418,10 +394,10 @@ mod tests {
 		let ann: Annotation<&str> = Annotation::Call(AnnotationCall {
 			id: "bool_search",
 			args: vec![
-				AnnotationArgument::Literal(AnnotationLiteral::Annotation(Annotation::Atom(
+				Argument::Literal(AnnotationLiteral::Annotation(Annotation::Atom(
 					"input_order",
 				))),
-				AnnotationArgument::Literal(AnnotationLiteral::Annotation(Annotation::Atom(
+				Argument::Literal(AnnotationLiteral::Annotation(Annotation::Atom(
 					"indomain_min",
 				))),
 			],

@@ -133,7 +133,7 @@ use std::{
 	collections::HashSet,
 	fmt::{Debug, Display},
 	hash::{Hash, Hasher},
-	sync::{Arc, Weak},
+	sync::Arc,
 };
 
 pub use rangelist::RangeList;
@@ -162,23 +162,6 @@ pub enum Annotation<Identifier = String> {
 	Call(AnnotationCall<Identifier>),
 }
 
-/// The argument type associated with [`AnnotationCall`]
-#[cfg_attr(feature = "serde", derive(Serialize))]
-#[cfg_attr(feature = "serde", serde(untagged))]
-#[derive(Clone, Debug)]
-pub enum AnnotationArgument<Identifier = String> {
-	/// Sequence of [`Literal`]s
-	Array(Vec<AnnotationLiteral<Identifier>>),
-	#[cfg_attr(
-		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_array_weak")
-	)]
-	/// Named array of [`Literal`]s
-	ArrayNamed(Weak<Array<Identifier>>),
-	/// Singular argument
-	Literal(AnnotationLiteral<Identifier>),
-}
-
 /// An object depicting an annotation in the form of a call
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename = "annotation_call"))]
@@ -187,64 +170,41 @@ pub struct AnnotationCall<Identifier = String> {
 	/// Identifier of the constraint predicate
 	pub id: Identifier,
 	/// Arguments of the constraint
-	pub args: Vec<AnnotationArgument<Identifier>>,
+	pub args: Vec<Argument<Identifier, AnnotationLiteral<Identifier>>>,
 }
 
 /// Literal values as arguments to [`AnnotationCall`]
+///
+/// These are the same as regular [`Literal`]s, except that they may
+/// additionally be a nested [`Annotation`].
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum AnnotationLiteral<Identifier = String> {
-	/// Integer value
-	Int(i64),
-	/// Floating point value
-	Float(f64),
-	/// Reference to a decision variable.
-	#[cfg_attr(
-		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_variable_weak")
-	)]
-	Variable(Weak<Variable<Identifier>>),
-	/// Boolean value
-	Bool(bool),
-	/// Set of integers, represented as a list of integer ranges
-	#[cfg_attr(
-		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_encapsulate_set")
-	)]
-	IntSet(RangeList<i64>),
-	/// Set of floating point values, represented as a list of floating point
-	/// ranges
-	#[cfg_attr(
-		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_encapsulate_set")
-	)]
-	FloatSet(RangeList<f64>),
-	/// String value
-	#[cfg_attr(
-		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_encapsulate_string")
-	)]
-	String(String),
+	/// A regular literal value.
+	Literal(Literal<Identifier>),
 	/// An annotation object.
 	Annotation(Annotation<Identifier>),
 }
 
 /// The argument type associated with [`Constraint`]
+///
+/// The literal type `L` is [`Literal`] for constraint arguments and
+/// [`AnnotationLiteral`] for annotation arguments.
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Clone, PartialEq, Debug)]
-pub enum Argument<Identifier = String> {
-	/// Sequence of [`Literal`]s
-	Array(Vec<Literal<Identifier>>),
-	/// Sequence of [`Literal`]s
+pub enum Argument<Identifier = String, L = Literal<Identifier>> {
+	/// Sequence of literals
+	Array(Vec<L>),
+	/// Named array of [`Literal`]s
 	#[cfg_attr(
 		feature = "serde",
 		serde(serialize_with = "serde_impl::serialize_array_arc",)
 	)]
 	ArrayNamed(Arc<Array<Identifier>>),
 	/// Literal
-	Literal(Literal<Identifier>),
+	Literal(L),
 }
 
 /// A definition of a named array literal in FlatZinc
@@ -457,55 +417,14 @@ impl<Identifier: Display> Display for Annotation<Identifier> {
 	}
 }
 
-impl<Idenfier: Display> Display for AnnotationArgument<Idenfier> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			AnnotationArgument::Array(arr) => {
-				write!(f, "[")?;
-				let mut first = true;
-				for v in arr {
-					if !first {
-						write!(f, ", ")?
-					}
-					write!(f, "{v}")?;
-					first = false;
-				}
-				write!(f, "]")
-			}
-			AnnotationArgument::ArrayNamed(array) => match array.upgrade() {
-				Some(array) => write!(f, "{}", &array.name),
-				None => write!(f, "[/* dangling array ref */]"),
-			},
-			AnnotationArgument::Literal(lit) => write!(f, "{lit}"),
-		}
-	}
-}
-
-impl<Identifier> From<Argument<Identifier>> for AnnotationArgument<Identifier> {
+impl<Identifier> From<Argument<Identifier, Literal<Identifier>>>
+	for Argument<Identifier, AnnotationLiteral<Identifier>>
+{
 	fn from(value: Argument<Identifier>) -> Self {
 		match value {
-			Argument::Array(arr) => {
-				AnnotationArgument::Array(arr.into_iter().map(|l| l.into()).collect())
-			}
-			Argument::ArrayNamed(arr) => AnnotationArgument::ArrayNamed(Arc::downgrade(&arr)),
-			Argument::Literal(l) => AnnotationArgument::Literal(l.into()),
-		}
-	}
-}
-
-impl<Identifier: PartialEq> PartialEq for AnnotationArgument<Identifier> {
-	fn eq(&self, other: &Self) -> bool {
-		match (self, other) {
-			(AnnotationArgument::Array(lhs), AnnotationArgument::Array(rhs)) => lhs == rhs,
-			(AnnotationArgument::ArrayNamed(lhs), AnnotationArgument::ArrayNamed(rhs)) => {
-				match (lhs.upgrade(), rhs.upgrade()) {
-					(Some(lhs), Some(rhs)) => lhs == rhs,
-					(None, None) => true,
-					_ => false,
-				}
-			}
-			(AnnotationArgument::Literal(lhs), AnnotationArgument::Literal(rhs)) => lhs == rhs,
-			_ => false,
+			Argument::Array(arr) => Argument::Array(arr.into_iter().map(|l| l.into()).collect()),
+			Argument::ArrayNamed(arr) => Argument::ArrayNamed(arr),
+			Argument::Literal(l) => Argument::Literal(l.into()),
 		}
 	}
 }
@@ -528,16 +447,7 @@ impl<Identifier: Display> Display for AnnotationCall<Identifier> {
 impl<Idenfier: Display> Display for AnnotationLiteral<Idenfier> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			AnnotationLiteral::Int(i) => write!(f, "{i}"),
-			AnnotationLiteral::Float(x) => write!(f, "{x:?}"),
-			AnnotationLiteral::Variable(var) => match var.upgrade() {
-				Some(var) => write!(f, "{}", var.name),
-				None => write!(f, "DANGLING_VARIABLE_REFERENCE"),
-			},
-			AnnotationLiteral::Bool(b) => write!(f, "{b}"),
-			AnnotationLiteral::IntSet(is) => write!(f, "{is}"),
-			AnnotationLiteral::FloatSet(fs) => write!(f, "{fs}"),
-			AnnotationLiteral::String(s) => write!(f, "{s:?}"),
+			AnnotationLiteral::Literal(lit) => write!(f, "{lit}"),
 			AnnotationLiteral::Annotation(ann) => write!(f, "{ann}"),
 		}
 	}
@@ -545,38 +455,11 @@ impl<Idenfier: Display> Display for AnnotationLiteral<Idenfier> {
 
 impl<Identifier> From<Literal<Identifier>> for AnnotationLiteral<Identifier> {
 	fn from(value: Literal<Identifier>) -> Self {
-		match value {
-			Literal::Int(i) => AnnotationLiteral::Int(i),
-			Literal::Float(f) => AnnotationLiteral::Float(f),
-			Literal::Bool(b) => AnnotationLiteral::Bool(b),
-			Literal::String(s) => AnnotationLiteral::String(s),
-			Literal::Variable(var) => AnnotationLiteral::Variable(Arc::downgrade(&var)),
-			Literal::IntSet(set) => AnnotationLiteral::IntSet(set),
-			Literal::FloatSet(set) => AnnotationLiteral::FloatSet(set),
-		}
+		AnnotationLiteral::Literal(value)
 	}
 }
 
-impl<Identifier: PartialEq> PartialEq for AnnotationLiteral<Identifier> {
-	fn eq(&self, other: &Self) -> bool {
-		match (self, other) {
-			(Self::Int(lhs), Self::Int(rhs)) => lhs == rhs,
-			(Self::Float(lhs), Self::Float(rhs)) => lhs == rhs,
-			(Self::Variable(lhs), Self::Variable(rhs)) => match (lhs.upgrade(), rhs.upgrade()) {
-				(Some(lhs), Some(rhs)) => lhs == rhs,
-				(None, None) => true,
-				_ => false,
-			},
-			(Self::Bool(lhs), Self::Bool(rhs)) => lhs == rhs,
-			(Self::IntSet(lhs), Self::IntSet(rhs)) => lhs == rhs,
-			(Self::FloatSet(lhs), Self::FloatSet(rhs)) => lhs == rhs,
-			(Self::String(lhs), Self::String(rhs)) => lhs == rhs,
-			(Self::Annotation(lhs), Self::Annotation(rhs)) => lhs == rhs,
-			_ => false,
-		}
-	}
-}
-impl<Identifier: Display> Display for Argument<Identifier> {
+impl<Identifier: Display, L: Display> Display for Argument<Identifier, L> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			Argument::Array(arr) => {
@@ -591,7 +474,7 @@ impl<Identifier: Display> Display for Argument<Identifier> {
 				}
 				write!(f, "]")
 			}
-			Argument::ArrayNamed(arr) => write!(f, "{}", &arr.name),
+			Argument::ArrayNamed(arr) => write!(f, "{}", arr.name),
 			Argument::Literal(lit) => write!(f, "{lit}"),
 		}
 	}

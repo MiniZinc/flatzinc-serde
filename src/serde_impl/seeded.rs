@@ -97,14 +97,16 @@ where
 			let ranges = map.next_value::<Vec<(NumberValue, NumberValue)>>()?;
 			ensure_object_finished(map)?;
 			match ranges.try_into().map_err(de::Error::custom)? {
-				NumericSet::Int(ranges) => Ok(AnnotationLiteral::IntSet(ranges)),
-				NumericSet::Float(ranges) => Ok(AnnotationLiteral::FloatSet(ranges)),
+				NumericSet::Int(ranges) => Ok(AnnotationLiteral::Literal(Literal::IntSet(ranges))),
+				NumericSet::Float(ranges) => {
+					Ok(AnnotationLiteral::Literal(Literal::FloatSet(ranges)))
+				}
 			}
 		}
 		"string" => {
 			let string = map.next_value::<String>()?;
 			ensure_object_finished(map)?;
-			Ok(AnnotationLiteral::String(string))
+			Ok(AnnotationLiteral::Literal(Literal::String(string)))
 		}
 		"id" => {
 			let raw = map.next_value::<Cow<'_, str>>()?;
@@ -548,11 +550,13 @@ where
 				{
 					values.push(value);
 				}
-				Ok(AnnotationArgument::Array(values))
+				Ok(Argument::Array(values))
 			}
 
 			fn visit_i64<E2>(self, value: i64) -> Result<Self::Value, E2> {
-				Ok(AnnotationArgument::Literal(AnnotationLiteral::Int(value)))
+				Ok(Argument::Literal(AnnotationLiteral::Literal(Literal::Int(
+					value,
+				))))
 			}
 
 			fn visit_u64<E2>(self, value: u64) -> Result<Self::Value, E2>
@@ -561,32 +565,38 @@ where
 			{
 				let value = i64::try_from(value)
 					.map_err(|_| E2::custom("integer literal is out of range"))?;
-				Ok(AnnotationArgument::Literal(AnnotationLiteral::Int(value)))
+				Ok(Argument::Literal(AnnotationLiteral::Literal(Literal::Int(
+					value,
+				))))
 			}
 
 			fn visit_f64<E2>(self, value: f64) -> Result<Self::Value, E2> {
-				Ok(AnnotationArgument::Literal(AnnotationLiteral::Float(value)))
+				Ok(Argument::Literal(AnnotationLiteral::Literal(
+					Literal::Float(value),
+				)))
 			}
 
 			fn visit_bool<E2>(self, value: bool) -> Result<Self::Value, E2> {
-				Ok(AnnotationArgument::Literal(AnnotationLiteral::Bool(value)))
+				Ok(Argument::Literal(AnnotationLiteral::Literal(
+					Literal::Bool(value),
+				)))
 			}
 
 			fn visit_borrowed_str<E2>(self, value: &'de str) -> Result<Self::Value, E2> {
-				Ok(AnnotationArgument::Literal(AnnotationLiteral::Reference(
-					self.state.names.intern(value),
+				Ok(Argument::Literal(AnnotationLiteral::Literal(
+					Literal::Reference(self.state.names.intern(value)),
 				)))
 			}
 
 			fn visit_str<E2>(self, value: &str) -> Result<Self::Value, E2> {
-				Ok(AnnotationArgument::Literal(AnnotationLiteral::Reference(
-					self.state.names.intern(value),
+				Ok(Argument::Literal(AnnotationLiteral::Literal(
+					Literal::Reference(self.state.names.intern(value)),
 				)))
 			}
 
 			fn visit_string<E2>(self, value: String) -> Result<Self::Value, E2> {
-				Ok(AnnotationArgument::Literal(AnnotationLiteral::Reference(
-					self.state.names.intern(&value),
+				Ok(Argument::Literal(AnnotationLiteral::Literal(
+					Literal::Reference(self.state.names.intern(&value)),
 				)))
 			}
 
@@ -597,7 +607,7 @@ where
 				let field = map
 					.next_key::<Cow<'_, str>>()?
 					.ok_or_else(|| de::Error::custom("expected an annotation literal object"))?;
-				Ok(AnnotationArgument::Literal(deserialize_annotation_literal(
+				Ok(Argument::Literal(deserialize_annotation_literal(
 					field, &mut map, self.state,
 				)?))
 			}
@@ -691,7 +701,7 @@ where
 			}
 
 			fn visit_i64<E2>(self, value: i64) -> Result<Self::Value, E2> {
-				Ok(AnnotationLiteral::Int(value))
+				Ok(AnnotationLiteral::Literal(Literal::Int(value)))
 			}
 
 			fn visit_u64<E2>(self, value: u64) -> Result<Self::Value, E2>
@@ -700,29 +710,33 @@ where
 			{
 				let value = i64::try_from(value)
 					.map_err(|_| E2::custom("integer literal is out of range"))?;
-				Ok(AnnotationLiteral::Int(value))
+				Ok(AnnotationLiteral::Literal(Literal::Int(value)))
 			}
 
 			fn visit_f64<E2>(self, value: f64) -> Result<Self::Value, E2> {
-				Ok(AnnotationLiteral::Float(value))
+				Ok(AnnotationLiteral::Literal(Literal::Float(value)))
 			}
 
 			fn visit_bool<E2>(self, value: bool) -> Result<Self::Value, E2> {
-				Ok(AnnotationLiteral::Bool(value))
+				Ok(AnnotationLiteral::Literal(Literal::Bool(value)))
 			}
 
 			fn visit_borrowed_str<E2>(self, value: &'de str) -> Result<Self::Value, E2> {
-				Ok(AnnotationLiteral::Reference(self.state.names.intern(value)))
+				Ok(AnnotationLiteral::Literal(Literal::Reference(
+					self.state.names.intern(value),
+				)))
 			}
 
 			fn visit_str<E2>(self, value: &str) -> Result<Self::Value, E2> {
-				Ok(AnnotationLiteral::Reference(self.state.names.intern(value)))
+				Ok(AnnotationLiteral::Literal(Literal::Reference(
+					self.state.names.intern(value),
+				)))
 			}
 
 			fn visit_string<E2>(self, value: String) -> Result<Self::Value, E2> {
-				Ok(AnnotationLiteral::Reference(
+				Ok(AnnotationLiteral::Literal(Literal::Reference(
 					self.state.names.intern(&value),
-				))
+				)))
 			}
 
 			fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>

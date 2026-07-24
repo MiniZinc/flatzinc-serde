@@ -24,13 +24,11 @@ pub(crate) enum Annotation<Identifier> {
 }
 
 /// An intermediate annotation argument.
-#[derive(Clone, PartialEq, Debug)]
-pub(crate) enum AnnotationArgument<Identifier> {
-	/// Array argument.
-	Array(Vec<AnnotationLiteral<Identifier>>),
-	/// Scalar argument.
-	Literal(AnnotationLiteral<Identifier>),
-}
+///
+/// A crate-internal alias for the [`Argument`] instantiation used by
+/// annotations, whose literals are [`AnnotationLiteral`]s (i.e., they may
+/// additionally be nested annotations). It keeps parser signatures readable.
+pub(crate) type AnnotationArgument<Identifier> = Argument<AnnotationLiteral<Identifier>>;
 
 /// An intermediate annotation call.
 #[derive(Clone, PartialEq, Debug)]
@@ -42,33 +40,27 @@ pub(crate) struct AnnotationCall<Identifier> {
 }
 
 /// An intermediate annotation literal.
+///
+/// These are the same as regular [`Literal`]s, except that they may
+/// additionally be a nested annotation.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) enum AnnotationLiteral<Identifier> {
-	/// Integer value.
-	Int(i64),
-	/// Floating-point value.
-	Float(f64),
-	/// Identifier that may refer to a model object or an annotation atom.
-	Reference(NameId),
-	/// Boolean value.
-	Bool(bool),
-	/// Integer set.
-	IntSet(RangeList<i64>),
-	/// Floating-point set.
-	FloatSet(RangeList<f64>),
-	/// String value.
-	String(String),
+	/// A regular literal value.
+	Literal(Literal),
 	/// Nested annotation value.
 	Annotation(AnnotationCall<Identifier>),
 }
 
 /// An intermediate argument.
+///
+/// The literal type `L` is [`Literal`] for constraint arguments and
+/// [`AnnotationLiteral`] for annotation arguments.
 #[derive(Clone, PartialEq, Debug)]
-pub(crate) enum Argument {
+pub(crate) enum Argument<L = Literal> {
 	/// An array of literals.
-	Array(Vec<Literal>),
+	Array(Vec<L>),
 	/// A literal value.
-	Literal(Literal),
+	Literal(L),
 }
 
 /// An intermediate array declaration.
@@ -140,6 +132,13 @@ struct Linker<Identifier, F> {
 	version: String,
 	/// Cache of resulting literals when resolving a [`NameId`].
 	resolved: Vec<Option<crate::Argument<Identifier>>>,
+	/// Marks each [`NameId`] whose declaration is currently being constructed,
+	/// so that a reference back to it can be recognized as self/cyclic.
+	in_progress: Vec<bool>,
+	/// Set while linking a single top-level annotation when it (transitively)
+	/// references a name that is still under construction. Such annotations are
+	/// silently dropped instead of becoming atoms or forming reference cycles.
+	self_ref: bool,
 }
 
 /// An intermediate literal.
@@ -231,15 +230,7 @@ pub(crate) struct Variable<Identifier> {
 
 impl<Identifier> From<Literal> for AnnotationLiteral<Identifier> {
 	fn from(value: Literal) -> Self {
-		match value {
-			Literal::Int(i) => AnnotationLiteral::Int(i),
-			Literal::Float(f) => AnnotationLiteral::Float(f),
-			Literal::Reference(name) => AnnotationLiteral::Reference(name),
-			Literal::Bool(b) => AnnotationLiteral::Bool(b),
-			Literal::IntSet(ranges) => AnnotationLiteral::IntSet(ranges),
-			Literal::FloatSet(ranges) => AnnotationLiteral::FloatSet(ranges),
-			Literal::String(string) => AnnotationLiteral::String(string),
-		}
+		AnnotationLiteral::Literal(value)
 	}
 }
 
@@ -274,11 +265,7 @@ where
 		Ok(crate::Literal::Variable(Arc::new(crate::Variable {
 			name: name.into_string(),
 			ty: variable.ty,
-			ann: variable
-				.ann
-				.into_iter()
-				.map(|a| self.link_annotation(a))
-				.collect::<Result<Vec<_>, _>>()?,
+			ann: self.link_annotations(variable.ann)?,
 			defined: variable.defined,
 			introduced: variable.introduced,
 		})))
@@ -370,18 +357,19 @@ where
 	/// Link one intermediate annotation argument.
 	fn link_annotation_argument(
 		&mut self,
-		argument: AnnotationArgument<Identifier>,
-	) -> Result<crate::AnnotationArgument<Identifier>, LinkError> {
-		match argument {
-			AnnotationArgument::Array(values) => Ok(crate::AnnotationArgument::Array(
+		arg: AnnotationArgument<Identifier>,
+	) -> Result<crate::Argument<Identifier, crate::AnnotationLiteral<Identifier>>, LinkError> {
+		match arg {
+			Argument::Array(values) => Ok(crate::Argument::<_, _>::Array(
 				values
 					.into_iter()
 					.map(|value| self.link_annotation_literal(value))
 					.collect::<Result<Vec<_>, _>>()?,
 			)),
-			AnnotationArgument::Literal(AnnotationLiteral::Reference(name)) => {
+			Argument::Literal(AnnotationLiteral::Literal(Literal::Reference(name))) => {
 				match self.link_argument(Argument::Literal(Literal::Reference(name))) {
 					Ok(arg) => Ok(arg.into()),
+					Err(err @ LinkError::UnknownReference(_)) if self.self_ref => Err(err),
 					Err(LinkError::UnknownReference(_)) => {
 						debug_assert!(matches!(
 							self.names.entries[name.index()].declaration,
@@ -392,14 +380,14 @@ where
 								ident: self.names.to_owned(name),
 								err: err.to_string(),
 							})?;
-						Ok(crate::AnnotationArgument::Literal(
+						Ok(crate::Argument::<_, _>::Literal(
 							crate::AnnotationLiteral::Annotation(crate::Annotation::Atom(ident)),
 						))
 					}
 					Err(err) => Err(err),
 				}
 			}
-			AnnotationArgument::Literal(value) => Ok(crate::AnnotationArgument::Literal(
+			Argument::Literal(value) => Ok(crate::Argument::<_, _>::Literal(
 				self.link_annotation_literal(value)?,
 			)),
 		}
@@ -426,11 +414,10 @@ where
 		literal: AnnotationLiteral<Identifier>,
 	) -> Result<crate::AnnotationLiteral<Identifier>, LinkError> {
 		Ok(match literal {
-			AnnotationLiteral::Int(i) => crate::AnnotationLiteral::Int(i),
-			AnnotationLiteral::Float(f) => crate::AnnotationLiteral::Float(f),
-			AnnotationLiteral::Reference(name) => {
+			AnnotationLiteral::Literal(Literal::Reference(name)) => {
 				match self.link_literal(Literal::Reference(name)) {
 					Ok(lit) => lit.into(),
+					Err(err @ LinkError::UnknownReference(_)) if self.self_ref => return Err(err),
 					Err(LinkError::UnknownReference(_)) => {
 						debug_assert!(matches!(
 							self.names.entries[name.index()].declaration,
@@ -446,25 +433,32 @@ where
 					Err(err) => return Err(err),
 				}
 			}
-			AnnotationLiteral::Bool(b) => crate::AnnotationLiteral::Bool(b),
-			AnnotationLiteral::IntSet(ranges) => crate::AnnotationLiteral::IntSet(ranges),
-			AnnotationLiteral::FloatSet(ranges) => crate::AnnotationLiteral::FloatSet(ranges),
-			AnnotationLiteral::String(string) => crate::AnnotationLiteral::String(string),
+			AnnotationLiteral::Literal(lit) => self.link_literal(lit)?.into(),
 			AnnotationLiteral::Annotation(annotation) => crate::AnnotationLiteral::Annotation(
 				crate::Annotation::Call(self.link_annotation_call(annotation)?),
 			),
 		})
 	}
 
-	/// Link a list of intermediate annotations.
+	/// Link a list of intermediate annotations, silently dropping any
+	/// annotation that references a name still under construction (a
+	/// self/cyclic reference).
 	fn link_annotations(
 		&mut self,
 		annotations: Vec<Annotation<Identifier>>,
 	) -> Result<Vec<crate::Annotation<Identifier>>, LinkError> {
-		annotations
-			.into_iter()
-			.map(|annotation| self.link_annotation(annotation))
-			.collect()
+		let mut linked = Vec::with_capacity(annotations.len());
+		for annotation in annotations {
+			self.self_ref = false;
+			match self.link_annotation(annotation) {
+				Ok(annotation) => linked.push(annotation),
+				// A self/cyclic reference unwinds as an unknown reference with
+				// `self_ref` set: drop this annotation rather than surfacing it.
+				Err(_) if self.self_ref => {}
+				Err(err) => return Err(err),
+			}
+		}
+		Ok(linked)
 	}
 
 	/// Link one intermediate argument.
@@ -549,6 +543,8 @@ where
 			solve: model.solve,
 			version: model.version,
 			resolved: vec![None; names_len],
+			in_progress: vec![false; names_len],
+			self_ref: false,
 		}
 	}
 
@@ -571,12 +567,32 @@ where
 		if let Some(arg) = &self.resolved[name.index()] {
 			return Ok(arg.clone());
 		}
+		if self.in_progress[name.index()] {
+			// Back-edge to a name whose annotations are still being linked: the
+			// enclosing annotation is self/cyclic and gets dropped by
+			// `link_annotations`. Reported as an unknown reference so it unwinds
+			// through the normal machinery without extracting the entry.
+			self.self_ref = true;
+			return Err(LinkError::UnknownReference(self.names.to_owned(name)));
+		}
 		let entry = self.names.extract_entry(name);
 		let arg = match entry.declaration {
 			Declaration::Variable(variable) => {
-				crate::Argument::Literal(self.create_variable(entry.name, variable)?)
+				self.in_progress[name.index()] = true;
+				// Isolate the caller's annotation from self-references dropped
+				// while constructing this (nested) variable's own annotations.
+				let saved = self.self_ref;
+				let result = self.create_variable(entry.name, variable);
+				self.self_ref = saved;
+				crate::Argument::Literal(result?)
 			}
-			Declaration::Array(array) => self.create_array(entry.name, array)?,
+			Declaration::Array(array) => {
+				self.in_progress[name.index()] = true;
+				let saved = self.self_ref;
+				let result = self.create_array(entry.name, array);
+				self.self_ref = saved;
+				result?
+			}
 			Declaration::Uninit => {
 				self.names.entries[name.index()] = entry;
 				return Err(LinkError::UnknownReference(self.names.to_owned(name)));

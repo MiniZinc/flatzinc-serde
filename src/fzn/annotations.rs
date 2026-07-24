@@ -10,7 +10,8 @@ use winnow::{
 use crate::{
 	fzn::{Stream, identifier, intern_parsed_identifier, literal, token},
 	intermediate::{
-		Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Literal, NameId,
+		Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral, Argument, Literal,
+		NameId,
 	},
 };
 
@@ -68,13 +69,13 @@ where
 	E: Display,
 {
 	alt((
-		annotation_literal.map(AnnotationArgument::Literal),
+		annotation_literal.map(Argument::Literal),
 		delimited(
 			token('['),
 			separated(0.., token(annotation_literal), token(',')),
 			token(']'),
 		)
-		.map(AnnotationArgument::Array),
+		.map(Argument::Array),
 	))
 	.parse_next(input)
 }
@@ -180,7 +181,7 @@ where
 	for (ident, args) in anns {
 		match (ident, args) {
 			("defines_var", Some(mut args)) if args.len() == 1 => {
-				if let AnnotationArgument::Literal(AnnotationLiteral::Reference(name)) =
+				if let Argument::Literal(AnnotationLiteral::Literal(Literal::Reference(name))) =
 					args.remove(0)
 				{
 					defines = Some(name);
@@ -252,7 +253,7 @@ mod tests {
 			general_annotations,
 			tests::{annotation_identifier, parse_with_names},
 		},
-		intermediate::{Annotation, AnnotationArgument, AnnotationCall, AnnotationLiteral},
+		intermediate::{Annotation, AnnotationCall, AnnotationLiteral, Argument, Literal},
 	};
 
 	#[test]
@@ -265,12 +266,14 @@ mod tests {
 			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
-				args: vec![AnnotationArgument::Array(vec![
+				args: vec![Argument::Array(vec![
 					AnnotationLiteral::Annotation(AnnotationCall {
 						id: "other_annotation".to_owned(),
-						args: vec![AnnotationArgument::Literal(AnnotationLiteral::Int(5),)],
+						args: vec![Argument::Literal(AnnotationLiteral::Literal(Literal::Int(
+							5
+						),))],
 					}),
-					AnnotationLiteral::Float(3.4),
+					AnnotationLiteral::Literal(Literal::Float(3.4)),
 				])],
 			})],
 		);
@@ -284,7 +287,7 @@ mod tests {
 			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
-				args: vec![AnnotationArgument::Literal(annotation_identifier(
+				args: vec![Argument::Literal(annotation_identifier(
 					&names,
 					"other_annotation"
 				),)],
@@ -296,9 +299,9 @@ mod tests {
 			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
-				args: vec![AnnotationArgument::Literal(AnnotationLiteral::IntSet(
-					RangeList::from(1..=5)
-				),)],
+				args: vec![Argument::Literal(AnnotationLiteral::Literal(
+					Literal::IntSet(RangeList::from(1..=5))
+				))],
 			})],
 		);
 	}
@@ -313,10 +316,12 @@ mod tests {
 			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
-				args: vec![AnnotationArgument::Literal(AnnotationLiteral::Annotation(
+				args: vec![Argument::Literal(AnnotationLiteral::Annotation(
 					AnnotationCall {
 						id: "other_annotation".to_owned(),
-						args: vec![AnnotationArgument::Literal(AnnotationLiteral::Int(5),)],
+						args: vec![Argument::Literal(AnnotationLiteral::Literal(Literal::Int(
+							5
+						),))],
 					}
 				),)],
 			})],
@@ -330,7 +335,7 @@ mod tests {
 			actual,
 			vec![Annotation::Call(AnnotationCall {
 				id: "some_annotation".to_owned(),
-				args: vec![AnnotationArgument::Literal(AnnotationLiteral::Annotation(
+				args: vec![Argument::Literal(AnnotationLiteral::Annotation(
 					AnnotationCall {
 						id: "another_annotation".to_owned(),
 						args: vec![],
