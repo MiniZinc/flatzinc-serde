@@ -16,6 +16,7 @@ use winnow::{
 use crate::{
 	FlatZinc, Type,
 	error::FznParseError,
+	helpers::FznRef,
 	intermediate::{
 		self, Argument, Array, Constraint, Declaration, Literal, Method, NameId, ParserState,
 		SolveObjective, Variable,
@@ -231,7 +232,9 @@ fn map_parse_error<Identifier, F>(
 ///
 /// This is used by [`crate::FlatZinc::from_fzn`], which is the public entry
 /// point for `.fzn` parsing.
-pub(crate) fn parse<I, E>(source: impl BufRead) -> Result<FlatZinc<I>, FznParseError>
+pub(crate) fn parse<I, E, Ref: FznRef>(
+	source: impl BufRead,
+) -> Result<FlatZinc<I, Ref>, FznParseError>
 where
 	I: Clone + for<'a> TryFrom<&'a str, Error = E>,
 	E: Display,
@@ -241,10 +244,10 @@ where
 
 /// Parse the `.fzn` source to a [`FlatZinc`] instance using a custom
 /// identifier interner.
-pub(crate) fn parse_with_interner<I, F, E>(
+pub(crate) fn parse_with_interner<I, F, E, Ref: FznRef>(
 	mut source: impl BufRead,
 	mut interner: F,
-) -> Result<FlatZinc<I>, FznParseError>
+) -> Result<FlatZinc<I, Ref>, FznParseError>
 where
 	I: Clone,
 	F: FnMut(&str) -> Result<I, E>,
@@ -608,6 +611,7 @@ mod tests {
 	}
 
 	use std::{
+		borrow::Cow,
 		convert::Infallible,
 		fmt::Debug,
 		fs::File,
@@ -811,7 +815,7 @@ mod tests {
 			.unwrap_or_else(|| panic!("expected interned name `{expected}`"))
 	}
 
-	fn output_names<Identifier>(fzn: &FlatZinc<Identifier>) -> Vec<&str> {
+	fn output_names<Identifier>(fzn: &FlatZinc<Identifier>) -> Vec<Cow<'_, str>> {
 		fzn.output.iter().map(NamedRef::name).collect()
 	}
 

@@ -3,17 +3,13 @@
 
 pub(crate) mod seeded;
 
-use std::{
-	fmt::{Debug, Display},
-	ops::Deref,
-	sync::Arc,
-};
+use std::fmt::{Debug, Display};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
 	Annotation, Array, FlatZinc, Literal, Method, NamedRef, RangeList, SolveObjective, Type,
-	Variable,
+	Variable, helpers::FznRef,
 };
 
 /// Base variable type used for the `"type"` field in FlatZinc JSON.
@@ -71,24 +67,24 @@ pub(crate) fn is_false(b: &bool) -> bool {
 	!(*b)
 }
 
-/// Serialize an [`Arc<Array>`] by serializing its name, if present, or its
-/// contents otherwise.
-pub(crate) fn serialize_array_arc<S: Serializer, Identifier>(
-	array: &Arc<Array<Identifier>>,
+/// Serialize a shared [`Array`] reference by serializing its name, if present,
+/// or its contents otherwise.
+pub(crate) fn serialize_array_ref<S: Serializer, Identifier, Ref: FznRef>(
+	array: &Ref::Of<Array<Identifier, Ref>>,
 	serializer: S,
 ) -> Result<S::Ok, S::Error> {
-	Serialize::serialize(&array.name, serializer)
+	Ref::with(array, |array| Serialize::serialize(&array.name, serializer))
 }
 
-/// Serialize a slice of [`Arc<Array>`] references into a key-value map, using
+/// Serialize a slice of shared [`Array`] references into a key-value map, using
 /// the array name as the key.
-pub(crate) fn serialize_array_map<S: Serializer, Identifier: Serialize>(
-	arrays: &[Arc<Array<Identifier>>],
+pub(crate) fn serialize_array_map<S: Serializer, Identifier: Serialize, Ref: FznRef>(
+	arrays: &[Ref::Of<Array<Identifier, Ref>>],
 	serializer: S,
 ) -> Result<S::Ok, S::Error> {
 	let mut state = serializer.serialize_map(Some(arrays.len()))?;
 	for arr in arrays {
-		state.serialize_entry(&arr.name, arr.deref())?;
+		Ref::with(arr, |arr| state.serialize_entry(&arr.name, arr))?;
 	}
 	state.end()
 }
@@ -136,28 +132,30 @@ pub(crate) fn serialize_set<E: PartialOrd + Serialize + Copy, S: Serializer>(
 	Serialize::serialize(&x, serializer)
 }
 
-/// Serialize an [`Arc<Variable>`] by serializing its name.
-pub(crate) fn serialize_variable_arc<S: Serializer, Identifier>(
-	variable: &Arc<Variable<Identifier>>,
+/// Serialize a shared [`Variable`] reference by serializing its name.
+pub(crate) fn serialize_variable_ref<S: Serializer, Identifier, Ref: FznRef>(
+	variable: &Ref::Of<Variable<Identifier, Ref>>,
 	serializer: S,
 ) -> Result<S::Ok, S::Error> {
-	Serialize::serialize(&variable.name, serializer)
+	Ref::with(variable, |variable| {
+		Serialize::serialize(&variable.name, serializer)
+	})
 }
 
-/// Serialize a slice of variables into a key-value map, using the variable
-/// name as the key.
-pub(crate) fn serialize_variable_map<S: Serializer, Identifier: Serialize>(
-	variables: &[Arc<Variable<Identifier>>],
+/// Serialize a slice of shared [`Variable`] references into a key-value map,
+/// using the variable name as the key.
+pub(crate) fn serialize_variable_map<S: Serializer, Identifier: Serialize, Ref: FznRef>(
+	variables: &[Ref::Of<Variable<Identifier, Ref>>],
 	serializer: S,
 ) -> Result<S::Ok, S::Error> {
 	let mut state = serializer.serialize_map(Some(variables.len()))?;
 	for var in variables {
-		state.serialize_entry(&var.name, var.deref())?;
+		Ref::with(var, |var| state.serialize_entry(&var.name, var))?;
 	}
 	state.end()
 }
 
-impl<'de, I, E> Deserialize<'de> for FlatZinc<I>
+impl<'de, I, E, Ref: FznRef> Deserialize<'de> for FlatZinc<I, Ref>
 where
 	I: Clone + Debug + for<'a> TryFrom<&'a str, Error = E>,
 	E: Display,
@@ -170,21 +168,22 @@ where
 	}
 }
 
-impl<Identifier: Serialize> Serialize for NamedRef<Identifier> {
+impl<Identifier: Serialize, Ref: FznRef> Serialize for NamedRef<Identifier, Ref> {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		self.name().serialize(serializer)
 	}
 }
 
-impl<Identifier: Serialize> Serialize for SolveObjective<Identifier> {
+impl<Identifier: Serialize, Ref: FznRef> Serialize for SolveObjective<Identifier, Ref> {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		#[derive(Serialize)]
-		struct SolveObjectiveRepr<'a, Identifier> {
+		#[serde(bound(serialize = "Identifier: Serialize, Ref: FznRef"))]
+		struct SolveObjectiveRepr<'a, Identifier, Ref: FznRef> {
 			method: &'static str,
 			#[serde(skip_serializing_if = "Option::is_none")]
-			objective: Option<&'a Literal<Identifier>>,
+			objective: Option<&'a Literal<Identifier, Ref>>,
 			#[serde(skip_serializing_if = "Vec::is_empty")]
-			ann: &'a Vec<Annotation<Identifier>>,
+			ann: &'a Vec<Annotation<Identifier, Ref>>,
 		}
 
 		let (method, objective) = match &self.method {
@@ -202,16 +201,17 @@ impl<Identifier: Serialize> Serialize for SolveObjective<Identifier> {
 	}
 }
 
-impl<Identifier: Serialize> Serialize for Variable<Identifier> {
+impl<Identifier: Serialize, Ref: FznRef> Serialize for Variable<Identifier, Ref> {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		#[derive(Serialize)]
-		struct VariableRepr<'a, Identifier> {
+		#[serde(bound(serialize = "Identifier: Serialize, Ref: FznRef"))]
+		struct VariableRepr<'a, Identifier, Ref: FznRef> {
 			#[serde(rename = "type")]
 			ty: BaseType,
 			#[serde(skip_serializing_if = "Option::is_none")]
 			domain: Option<VariableDomain>,
 			#[serde(default, skip_serializing_if = "Vec::is_empty")]
-			ann: &'a Vec<Annotation<Identifier>>,
+			ann: &'a Vec<Annotation<Identifier, Ref>>,
 			#[serde(default, skip_serializing_if = "is_false")]
 			defined: bool,
 			#[serde(default, skip_serializing_if = "is_false")]
@@ -346,7 +346,7 @@ mod tests {
 			defined: false,
 			introduced: false,
 		});
-		let fzn = FlatZinc {
+		let fzn: FlatZinc<String> = FlatZinc {
 			variables: vec![Arc::clone(&x)],
 			arrays: vec![Arc::clone(&y)],
 			constraints: vec![],
@@ -426,7 +426,7 @@ mod tests {
 			defined: false,
 			introduced: true,
 		});
-		let lit = Literal::Variable(Arc::clone(&x));
+		let lit: Literal<&str> = Literal::Variable(Arc::clone(&x));
 		assert_eq!(lit.to_string(), "x");
 		let lit = Literal::<&str>::Bool(true);
 		assert_eq!(lit.to_string(), "true");
@@ -444,7 +444,7 @@ mod tests {
 			introduced: true,
 			defined: true,
 		});
-		let fzn = FlatZinc {
+		let fzn: FlatZinc<&str> = FlatZinc {
 			variables: vec![Arc::clone(&x)],
 			arrays: vec![Arc::clone(&y)],
 			output: vec![NamedRef::Array(Arc::clone(&y))],

@@ -2,10 +2,138 @@
 //! deserialization of FlatZinc data.
 
 use std::{
+	borrow::Cow,
+	fmt::Debug,
 	hash::{Hash, Hasher},
 	ops::Deref,
-	sync::Arc,
+	sync::{Arc, PoisonError, RwLock},
 };
+
+/// A family of smart pointers used to share the [`Variable`](crate::Variable)
+/// and [`Array`](crate::Array) declarations of a
+/// [`FlatZinc`](crate::FlatZinc) instance.
+///
+/// This is the trait behind the `Ref` type parameter of the public types. It
+/// selects whether the shared declarations are plain [`Immutable`] `Arc<T>`
+/// values, as produced by parsing, or [`Mutable`] `Arc<RwLock<T>>` values that
+/// can be edited in place after the instance has been constructed.
+///
+/// The supertraits are free — implementors are zero-sized markers — and let the
+/// derived `Clone`, `Debug`, and `PartialEq` implementations on the public
+/// types, which bound every type parameter, be satisfied by `Ref: FznRef`
+/// alone.
+pub trait FznRef: Copy + Debug + Eq {
+	/// The reference type used to share a `T`.
+	type Of<T>: Clone;
+
+	/// Allocate a new shared declaration.
+	fn new<T>(value: T) -> Self::Of<T>;
+
+	/// Borrow the shared declaration for reading, and apply `f` to it.
+	fn with<T, R>(node: &Self::Of<T>, f: impl FnOnce(&T) -> R) -> R;
+
+	/// The address of the shared allocation, used to test pointer identity.
+	///
+	/// Comparing two references with [`FznRef::with`] would take two read locks
+	/// under [`Mutable`], which deadlocks if both name the same declaration and
+	/// a writer is waiting. Testing this first avoids that.
+	///
+	/// This returns a bare address rather than a pointer, matching the
+	/// `addr` method on raw pointers, because the result is only ever compared:
+	/// keeping it a pointer would carry provenance that no caller is entitled
+	/// to use.
+	fn addr<T>(node: &Self::Of<T>) -> usize;
+
+	/// Project a string field out of the shared declaration.
+	///
+	/// The result borrows from `node` for [`Immutable`], but must be cloned for
+	/// [`Mutable`], where no borrow can escape the lock guard.
+	///
+	/// This exists solely for [`NamedRef::name`](crate::NamedRef::name), which
+	/// must hand back a value that outlives the call. Anything that consumes
+	/// the name in place should use [`FznRef::with`] instead, which allocates
+	/// under neither marker.
+	fn map_str<'a, T>(node: &'a Self::Of<T>, f: impl FnOnce(&T) -> &str) -> Cow<'a, str>;
+}
+
+/// Marker selecting immutable shared declarations, represented as `Arc<T>`.
+///
+/// This is the default, and the representation produced by parsing. Reading a
+/// declaration is a plain pointer dereference.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Immutable;
+
+/// Marker selecting interior-mutable shared declarations, represented as
+/// `Arc<RwLock<T>>`.
+///
+/// This allows a [`Variable`](crate::Variable) or [`Array`](crate::Array) to be
+/// edited after the instance has been constructed, with every reference to that
+/// declaration observing the change. Since `Mutable::Of<T>` is simply
+/// `Arc<RwLock<T>>`, edits are made through the normal lock API:
+///
+/// ```
+/// # use std::sync::{Arc, RwLock};
+/// # use flatzinc_serde::{Type, Variable, helpers::Mutable};
+/// # let var: Arc<RwLock<Variable<String, Mutable>>> = Arc::new(RwLock::new(Variable {
+/// #     name: "x".to_owned(),
+/// #     ty: Type::Int(None),
+/// #     ann: Vec::new(),
+/// #     defined: false,
+/// #     introduced: false,
+/// # }));
+/// var.write().unwrap().ty = Type::Bool;
+/// ```
+///
+/// ### Warning
+///
+/// Reading a declaration takes a read lock, and several trait implementations
+/// do so implicitly: [`Display`](std::fmt::Display) and `Serialize` on any type
+/// that reaches a declaration, and [`Hash`], [`Ord`], and [`PartialEq`] on
+/// [`NamedRef`](crate::NamedRef), which read the declaration name. Holding a
+/// write guard on a declaration while invoking any of these on a value that
+/// reaches the same declaration will deadlock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Mutable;
+
+impl FznRef for Immutable {
+	type Of<T> = Arc<T>;
+
+	fn new<T>(value: T) -> Self::Of<T> {
+		Arc::new(value)
+	}
+
+	fn with<T, R>(node: &Self::Of<T>, f: impl FnOnce(&T) -> R) -> R {
+		f(node)
+	}
+
+	fn addr<T>(node: &Self::Of<T>) -> usize {
+		Arc::as_ptr(node).addr()
+	}
+
+	fn map_str<'a, T>(node: &'a Self::Of<T>, f: impl FnOnce(&T) -> &str) -> Cow<'a, str> {
+		Cow::Borrowed(f(node))
+	}
+}
+
+impl FznRef for Mutable {
+	type Of<T> = Arc<RwLock<T>>;
+
+	fn new<T>(value: T) -> Self::Of<T> {
+		Arc::new(RwLock::new(value))
+	}
+
+	fn with<T, R>(node: &Self::Of<T>, f: impl FnOnce(&T) -> R) -> R {
+		f(&node.read().unwrap_or_else(PoisonError::into_inner))
+	}
+
+	fn addr<T>(node: &Self::Of<T>) -> usize {
+		Arc::as_ptr(node).addr()
+	}
+
+	fn map_str<'a, T>(node: &'a Self::Of<T>, f: impl FnOnce(&T) -> &str) -> Cow<'a, str> {
+		Cow::Owned(f(&node.read().unwrap_or_else(PoisonError::into_inner)).to_owned())
+	}
+}
 
 /// A wrapper around an [`Arc`] that can be used as a key for collections, such
 /// as [`BTreeMap`](std::collections::BTreeMap),
@@ -47,13 +175,15 @@ impl<T> Eq for ArcKey<T> {}
 
 impl<T> Hash for ArcKey<T> {
 	fn hash<H: Hasher>(&self, state: &mut H) {
-		Arc::as_ptr(&self.key).hash(state);
+		Arc::as_ptr(&self.key).addr().hash(state);
 	}
 }
 
 impl<T> Ord for ArcKey<T> {
 	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-		Arc::as_ptr(&self.key).cmp(&Arc::as_ptr(&other.key))
+		Arc::as_ptr(&self.key)
+			.addr()
+			.cmp(&Arc::as_ptr(&other.key).addr())
 	}
 }
 

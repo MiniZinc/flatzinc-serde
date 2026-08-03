@@ -9,10 +9,12 @@ use std::{
 	collections::HashMap,
 	fmt::{Debug, Display, Formatter},
 	mem,
-	sync::Arc,
 };
 
-use crate::{LinkError, NamedRef, RangeList, Type};
+use crate::{
+	LinkError, NamedRef, RangeList, Type,
+	helpers::{FznRef, Immutable},
+};
 
 /// An intermediate annotation.
 #[derive(Clone, PartialEq, Debug)]
@@ -117,7 +119,7 @@ pub(crate) struct FlatZinc<Identifier> {
 }
 
 /// Internal linker state used by [`TryFrom<FlatZinc<_>>`].
-struct Linker<Identifier, F> {
+struct Linker<Identifier, F, Ref: FznRef = Immutable> {
 	/// Interned model namespace and intermediate declarations.
 	names: NameStore<Identifier>,
 	/// Identifier interner function.
@@ -131,7 +133,7 @@ struct Linker<Identifier, F> {
 	/// FlatZinc serialization version.
 	version: String,
 	/// Cache of resulting literals when resolving a [`NameId`].
-	resolved: Vec<Option<crate::Argument<Identifier>>>,
+	resolved: Vec<Option<crate::Argument<Identifier, Ref>>>,
 	/// Marks each [`NameId`] whose declaration is currently being constructed,
 	/// so that a reference back to it can be recognized as self/cyclic.
 	in_progress: Vec<bool>,
@@ -234,7 +236,7 @@ impl<Identifier> From<Literal> for AnnotationLiteral<Identifier> {
 	}
 }
 
-impl<Identifier, F, E> Linker<Identifier, F>
+impl<Identifier, F, E, Ref: FznRef> Linker<Identifier, F, Ref>
 where
 	Identifier: Clone,
 	F: FnMut(&str) -> Result<Identifier, E>,
@@ -245,8 +247,8 @@ where
 		&mut self,
 		name: Box<str>,
 		array: Array<Identifier>,
-	) -> Result<crate::Argument<Identifier>, LinkError> {
-		let array = Arc::new(crate::Array {
+	) -> Result<crate::Argument<Identifier, Ref>, LinkError> {
+		let array = Ref::new(crate::Array {
 			name: name.into_string(),
 			contents: self.link_literals(array.contents)?,
 			ann: self.link_annotations(array.ann)?,
@@ -261,8 +263,8 @@ where
 		&mut self,
 		name: Box<str>,
 		variable: Variable<Identifier>,
-	) -> Result<crate::Literal<Identifier>, LinkError> {
-		Ok(crate::Literal::Variable(Arc::new(crate::Variable {
+	) -> Result<crate::Literal<Identifier, Ref>, LinkError> {
+		Ok(crate::Literal::Variable(Ref::new(crate::Variable {
 			name: name.into_string(),
 			ty: variable.ty,
 			ann: self.link_annotations(variable.ann)?,
@@ -272,7 +274,7 @@ where
 	}
 
 	/// Convert the owned intermediate model into the public FlatZinc graph.
-	fn link(mut self) -> Result<crate::FlatZinc<Identifier>, LinkError> {
+	fn link(mut self) -> Result<crate::FlatZinc<Identifier, Ref>, LinkError> {
 		let mut var_names = Vec::new();
 		let mut arr_names = Vec::new();
 
@@ -347,7 +349,7 @@ where
 	fn link_annotation(
 		&mut self,
 		annotation: Annotation<Identifier>,
-	) -> Result<crate::Annotation<Identifier>, LinkError> {
+	) -> Result<crate::Annotation<Identifier, Ref>, LinkError> {
 		match annotation {
 			Annotation::Atom(id) => Ok(crate::Annotation::Atom(id)),
 			Annotation::Call(call) => Ok(crate::Annotation::Call(self.link_annotation_call(call)?)),
@@ -358,9 +360,12 @@ where
 	fn link_annotation_argument(
 		&mut self,
 		arg: AnnotationArgument<Identifier>,
-	) -> Result<crate::Argument<Identifier, crate::AnnotationLiteral<Identifier>>, LinkError> {
+	) -> Result<
+		crate::Argument<Identifier, Ref, crate::AnnotationLiteral<Identifier, Ref>>,
+		LinkError,
+	> {
 		match arg {
-			Argument::Array(values) => Ok(crate::Argument::<_, _>::Array(
+			Argument::Array(values) => Ok(crate::Argument::<_, _, _>::Array(
 				values
 					.into_iter()
 					.map(|value| self.link_annotation_literal(value))
@@ -380,14 +385,14 @@ where
 								ident: self.names.to_owned(name),
 								err: err.to_string(),
 							})?;
-						Ok(crate::Argument::<_, _>::Literal(
+						Ok(crate::Argument::<_, _, _>::Literal(
 							crate::AnnotationLiteral::Annotation(crate::Annotation::Atom(ident)),
 						))
 					}
 					Err(err) => Err(err),
 				}
 			}
-			Argument::Literal(value) => Ok(crate::Argument::<_, _>::Literal(
+			Argument::Literal(value) => Ok(crate::Argument::<_, _, _>::Literal(
 				self.link_annotation_literal(value)?,
 			)),
 		}
@@ -397,7 +402,7 @@ where
 	fn link_annotation_call(
 		&mut self,
 		call: AnnotationCall<Identifier>,
-	) -> Result<crate::AnnotationCall<Identifier>, LinkError> {
+	) -> Result<crate::AnnotationCall<Identifier, Ref>, LinkError> {
 		Ok(crate::AnnotationCall {
 			id: call.id,
 			args: call
@@ -412,7 +417,7 @@ where
 	fn link_annotation_literal(
 		&mut self,
 		literal: AnnotationLiteral<Identifier>,
-	) -> Result<crate::AnnotationLiteral<Identifier>, LinkError> {
+	) -> Result<crate::AnnotationLiteral<Identifier, Ref>, LinkError> {
 		Ok(match literal {
 			AnnotationLiteral::Literal(Literal::Reference(name)) => {
 				match self.link_literal(Literal::Reference(name)) {
@@ -446,7 +451,7 @@ where
 	fn link_annotations(
 		&mut self,
 		annotations: Vec<Annotation<Identifier>>,
-	) -> Result<Vec<crate::Annotation<Identifier>>, LinkError> {
+	) -> Result<Vec<crate::Annotation<Identifier, Ref>>, LinkError> {
 		let mut linked = Vec::with_capacity(annotations.len());
 		for annotation in annotations {
 			self.self_ref = false;
@@ -462,7 +467,10 @@ where
 	}
 
 	/// Link one intermediate argument.
-	fn link_argument(&mut self, arg: Argument) -> Result<crate::Argument<Identifier>, LinkError> {
+	fn link_argument(
+		&mut self,
+		arg: Argument,
+	) -> Result<crate::Argument<Identifier, Ref>, LinkError> {
 		Ok(match arg {
 			Argument::Array(lits) => crate::Argument::Array(
 				lits.into_iter()
@@ -478,7 +486,7 @@ where
 	fn link_constraint(
 		&mut self,
 		constraint: Constraint<Identifier>,
-	) -> Result<crate::Constraint<Identifier>, LinkError> {
+	) -> Result<crate::Constraint<Identifier, Ref>, LinkError> {
 		let defines = if let Some(name) = constraint.defines {
 			self.link_name(name)?
 		} else {
@@ -497,7 +505,10 @@ where
 	}
 
 	/// Link one intermediate literal.
-	fn link_literal(&mut self, literal: Literal) -> Result<crate::Literal<Identifier>, LinkError> {
+	fn link_literal(
+		&mut self,
+		literal: Literal,
+	) -> Result<crate::Literal<Identifier, Ref>, LinkError> {
 		Ok(match literal {
 			Literal::Int(i) => crate::Literal::Int(i),
 			Literal::Float(f) => crate::Literal::Float(f),
@@ -513,7 +524,7 @@ where
 	fn link_literals(
 		&mut self,
 		literals: Vec<Literal>,
-	) -> Result<Vec<crate::Literal<Identifier>>, LinkError> {
+	) -> Result<Vec<crate::Literal<Identifier, Ref>>, LinkError> {
 		literals
 			.into_iter()
 			.map(|literal| self.link_literal(literal))
@@ -522,7 +533,7 @@ where
 
 	/// Link the named reference if possible, returning `None` if the name does
 	/// not result in a variable or named array in the resulting model.
-	fn link_name(&mut self, name: NameId) -> Result<Option<NamedRef<Identifier>>, LinkError> {
+	fn link_name(&mut self, name: NameId) -> Result<Option<NamedRef<Identifier, Ref>>, LinkError> {
 		Ok(match self.resolve_name(name)? {
 			crate::Argument::Literal(crate::Literal::Variable(var)) => {
 				Some(NamedRef::Variable(var))
@@ -552,7 +563,7 @@ where
 	fn resolve_literal_name(
 		&mut self,
 		name: NameId,
-	) -> Result<crate::Literal<Identifier>, LinkError> {
+	) -> Result<crate::Literal<Identifier, Ref>, LinkError> {
 		match self.resolve_name(name)? {
 			crate::Argument::Literal(lit) => Ok(lit),
 			crate::Argument::ArrayNamed(_) => {
@@ -563,7 +574,10 @@ where
 	}
 
 	/// Resolve one model-level name into its linked argument form.
-	fn resolve_name(&mut self, name: NameId) -> Result<crate::Argument<Identifier>, LinkError> {
+	fn resolve_name(
+		&mut self,
+		name: NameId,
+	) -> Result<crate::Argument<Identifier, Ref>, LinkError> {
 		if let Some(arg) = &self.resolved[name.index()] {
 			return Ok(arg.clone());
 		}
@@ -790,7 +804,7 @@ impl<Identifier, F> Debug for ParserState<Identifier, F> {
 	}
 }
 
-impl<Identifier: Clone> crate::FlatZinc<Identifier> {
+impl<Identifier: Clone, Ref: FznRef> crate::FlatZinc<Identifier, Ref> {
 	/// Convert an intermediate [`FlatZinc`] model into a [`crate::FlatZinc`]
 	/// instance, finalizing annotation atoms using the provided interner.
 	pub(crate) fn from_intermediate<F, E>(

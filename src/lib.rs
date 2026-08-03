@@ -129,11 +129,12 @@ mod intermediate;
 mod serde_impl;
 
 use std::{
+	borrow::Cow,
 	cmp::Ordering,
 	collections::HashSet,
 	fmt::{Debug, Display},
 	hash::{Hash, Hasher},
-	sync::Arc,
+	sync::{Arc, RwLock},
 };
 
 pub use rangelist::RangeList;
@@ -141,7 +142,7 @@ pub use rangelist::RangeList;
 use serde::{Deserializer, Serialize};
 
 pub use crate::error::{FznParseError, LinkError};
-use crate::helpers::ArcKey;
+use crate::helpers::{ArcKey, FznRef, Immutable, Mutable};
 
 /// Additional information provided in a standardized format for declarations,
 /// constraints, or solve objectives
@@ -154,23 +155,31 @@ use crate::helpers::ArcKey;
 /// rewrite annotations in their redefinitions library when required.
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
+#[cfg_attr(
+	feature = "serde",
+	serde(bound(serialize = "Identifier: Serialize, Ref: FznRef"))
+)]
 #[derive(Clone, PartialEq, Debug)]
-pub enum Annotation<Identifier = String> {
+pub enum Annotation<Identifier = String, Ref: FznRef = Immutable> {
 	/// Atom annotation (i.e., a single `Identifier`)
 	Atom(Identifier),
 	/// Call annotation
-	Call(AnnotationCall<Identifier>),
+	Call(AnnotationCall<Identifier, Ref>),
 }
 
 /// An object depicting an annotation in the form of a call
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename = "annotation_call"))]
+#[cfg_attr(
+	feature = "serde",
+	serde(bound(serialize = "Identifier: Serialize, Ref: FznRef"))
+)]
 #[derive(Clone, PartialEq, Debug)]
-pub struct AnnotationCall<Identifier = String> {
+pub struct AnnotationCall<Identifier = String, Ref: FznRef = Immutable> {
 	/// Identifier of the constraint predicate
 	pub id: Identifier,
 	/// Arguments of the constraint
-	pub args: Vec<Argument<Identifier, AnnotationLiteral<Identifier>>>,
+	pub args: Vec<Argument<Identifier, Ref, AnnotationLiteral<Identifier, Ref>>>,
 }
 
 /// Literal values as arguments to [`AnnotationCall`]
@@ -179,32 +188,43 @@ pub struct AnnotationCall<Identifier = String> {
 /// additionally be a nested [`Annotation`].
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
+#[cfg_attr(
+	feature = "serde",
+	serde(bound(serialize = "Identifier: Serialize, Ref: FznRef"))
+)]
 #[derive(Clone, PartialEq, Debug)]
-pub enum AnnotationLiteral<Identifier = String> {
+pub enum AnnotationLiteral<Identifier = String, Ref: FznRef = Immutable> {
 	/// A regular literal value.
-	Literal(Literal<Identifier>),
+	Literal(Literal<Identifier, Ref>),
 	/// An annotation object.
-	Annotation(Annotation<Identifier>),
+	Annotation(Annotation<Identifier, Ref>),
 }
 
 /// The argument type associated with [`Constraint`]
 ///
 /// The literal type `L` is [`Literal`] for constraint arguments and
 /// [`AnnotationLiteral`] for annotation arguments.
+///
+/// Note that `Ref` precedes `L` in the parameter list, because the default for
+/// `L` is written in terms of `Ref` and a default cannot forward-reference a
+/// later parameter.
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
-#[derive(Clone, PartialEq, Debug)]
-pub enum Argument<Identifier = String, L = Literal<Identifier>> {
+#[cfg_attr(
+	feature = "serde",
+	serde(bound(serialize = "Identifier: Serialize, Lit: Serialize, Ref: FznRef"))
+)]
+pub enum Argument<Identifier = String, Ref: FznRef = Immutable, Lit = Literal<Identifier, Ref>> {
 	/// Sequence of literals
-	Array(Vec<L>),
+	Array(Vec<Lit>),
 	/// Named array of [`Literal`]s
 	#[cfg_attr(
 		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_array_arc",)
+		serde(serialize_with = "serde_impl::serialize_array_ref::<_, _, Ref>",)
 	)]
-	ArrayNamed(Arc<Array<Identifier>>),
+	ArrayNamed(Ref::Of<Array<Identifier, Ref>>),
 	/// Literal
-	Literal(L),
+	Literal(Lit),
 }
 
 /// A definition of a named array literal in FlatZinc
@@ -216,8 +236,12 @@ pub enum Argument<Identifier = String, L = Literal<Identifier>> {
 /// `true`, then
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename = "array"))]
+#[cfg_attr(
+	feature = "serde",
+	serde(bound(serialize = "Identifier: Serialize, Ref: FznRef"))
+)]
 #[derive(Clone, PartialEq, Debug)]
-pub struct Array<Identifier = String> {
+pub struct Array<Identifier = String, Ref: FznRef = Immutable> {
 	/// The optional public name of the array literal.
 	///
 	/// This is `None` for arrays inlined within constraints.
@@ -225,10 +249,10 @@ pub struct Array<Identifier = String> {
 	pub name: String,
 	/// The values stored within the array literal
 	#[cfg_attr(feature = "serde", serde(rename = "a"))]
-	pub contents: Vec<Literal<Identifier>>,
+	pub contents: Vec<Literal<Identifier, Ref>>,
 	/// List of annotations
 	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
-	pub ann: Vec<Annotation<Identifier>>,
+	pub ann: Vec<Annotation<Identifier, Ref>>,
 	/// This field is set to `true` when there is a constraint that has been
 	/// marked as defining this array.
 	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "serde_impl::is_false"))]
@@ -243,18 +267,22 @@ pub struct Array<Identifier = String> {
 /// An object depicting a constraint
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename = "constraint"))]
+#[cfg_attr(
+	feature = "serde",
+	serde(bound(serialize = "Identifier: Serialize, Ref: FznRef"))
+)]
 #[derive(Clone, PartialEq, Debug)]
-pub struct Constraint<Identifier = String> {
+pub struct Constraint<Identifier = String, Ref: FznRef = Immutable> {
 	/// Identifier of the constraint predicate
 	pub id: Identifier,
 	/// Arguments of the constraint
-	pub args: Vec<Argument<Identifier>>,
+	pub args: Vec<Argument<Identifier, Ref>>,
 	/// Variable that the constraint defines
 	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-	pub defines: Option<NamedRef<Identifier>>,
+	pub defines: Option<NamedRef<Identifier, Ref>>,
 	/// List of annotations
 	#[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
-	pub ann: Vec<Annotation<Identifier>>,
+	pub ann: Vec<Annotation<Identifier, Ref>>,
 }
 
 /// The structure depicting a FlatZinc instance
@@ -263,28 +291,31 @@ pub struct Constraint<Identifier = String> {
 /// result of instantiating the parameter variables of a MiniZinc model and
 /// generating a solver-specific equisatisfiable model.
 #[cfg_attr(feature = "serde", derive(Serialize))]
-#[derive(Clone, PartialEq, Debug)]
-pub struct FlatZinc<Identifier = String> {
+#[cfg_attr(
+	feature = "serde",
+	serde(bound(serialize = "Identifier: Serialize, Ref: FznRef"))
+)]
+pub struct FlatZinc<Identifier = String, Ref: FznRef = Immutable> {
 	#[cfg_attr(
 		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_variable_map")
+		serde(serialize_with = "serde_impl::serialize_variable_map::<_, _, Ref>")
 	)]
 	/// A list of decision variable definitions.
-	pub variables: Vec<Arc<Variable<Identifier>>>,
+	pub variables: Vec<Ref::Of<Variable<Identifier, Ref>>>,
 	#[cfg_attr(
 		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_array_map")
+		serde(serialize_with = "serde_impl::serialize_array_map::<_, _, Ref>")
 	)]
 	/// A list of named array definitions.
-	pub arrays: Vec<Arc<Array<Identifier>>>,
+	pub arrays: Vec<Ref::Of<Array<Identifier, Ref>>>,
 	/// A list of (solver-specific) constraints, that must be satisfied in a
 	/// solution.
-	pub constraints: Vec<Constraint<Identifier>>,
+	pub constraints: Vec<Constraint<Identifier, Ref>>,
 	/// A list of all entities for which the solver must produce output for each
 	/// solution.
-	pub output: Vec<NamedRef<Identifier>>,
+	pub output: Vec<NamedRef<Identifier, Ref>>,
 	/// A specification of the goal of solving the FlatZinc instance.
-	pub solve: SolveObjective<Identifier>,
+	pub solve: SolveObjective<Identifier, Ref>,
 	/// The version of the FlatZinc serialization specification used
 	pub version: String,
 }
@@ -292,8 +323,11 @@ pub struct FlatZinc<Identifier = String> {
 /// Literal values
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
-#[derive(Clone, PartialEq, Debug)]
-pub enum Literal<Identifier = String> {
+#[cfg_attr(
+	feature = "serde",
+	serde(bound(serialize = "Identifier: Serialize, Ref: FznRef"))
+)]
+pub enum Literal<Identifier = String, Ref: FznRef = Immutable> {
 	/// Integer value
 	Int(i64),
 	/// Floating point value
@@ -301,9 +335,9 @@ pub enum Literal<Identifier = String> {
 	/// Reference to a decision variable.
 	#[cfg_attr(
 		feature = "serde",
-		serde(serialize_with = "serde_impl::serialize_variable_arc",)
+		serde(serialize_with = "serde_impl::serialize_variable_ref::<_, _, Ref>",)
 	)]
-	Variable(Arc<Variable<Identifier>>),
+	Variable(Ref::Of<Variable<Identifier, Ref>>),
 	/// Boolean value
 	Bool(bool),
 	/// Set of integers, represented as a list of integer ranges
@@ -329,14 +363,14 @@ pub enum Literal<Identifier = String> {
 
 /// Goal of solving a FlatZinc instance.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub enum Method<Identifier = String> {
+pub enum Method<Identifier = String, Ref: FznRef = Immutable> {
 	/// Find any solution.
 	#[default]
 	Satisfy,
 	/// Find the solution with the lowest value for the given objective.
-	Minimize(Literal<Identifier>),
+	Minimize(Literal<Identifier, Ref>),
 	/// Find the solution with the highest value for the given objective.
-	Maximize(Literal<Identifier>),
+	Maximize(Literal<Identifier, Ref>),
 }
 
 /// Reference to a named top-level declaration (variable or array)
@@ -352,24 +386,30 @@ pub enum Method<Identifier = String> {
 /// expose the same name are considered equal, and a variable and array with
 /// the same name are also treated as equal for these trait implementations.
 /// Note that this cannot occur in valid FlatZinc models.
-#[derive(Clone, Debug)]
-pub enum NamedRef<Identifier = String> {
+///
+/// ### Warning
+///
+/// Under [`Mutable`], the [`Hash`], [`Ord`], and [`PartialEq`]
+/// implementations take a read lock on the referenced declaration in order to
+/// read its name. Invoking them while holding a write guard on that same
+/// declaration will deadlock.
+pub enum NamedRef<Identifier = String, Ref: FznRef = Immutable> {
 	/// Reference to a variable.
-	Variable(Arc<Variable<Identifier>>),
+	Variable(Ref::Of<Variable<Identifier, Ref>>),
 	/// Reference to an array.
-	Array(Arc<Array<Identifier>>),
+	Array(Ref::Of<Array<Identifier, Ref>>),
 }
 
 /// A specification of objective of a FlatZinc instance
 #[derive(Clone, PartialEq, Debug)]
-pub struct SolveObjective<Identifier = String> {
+pub struct SolveObjective<Identifier = String, Ref: FznRef = Immutable> {
 	/// The method expected to be used for solving the instance.
-	pub method: Method<Identifier>,
+	pub method: Method<Identifier, Ref>,
 	/// A list of annotations from the solve statement in the MiniZinc model
 	///
 	/// Note that this includes the search annotations if they are present in
 	/// the model.
-	pub ann: Vec<Annotation<Identifier>>,
+	pub ann: Vec<Annotation<Identifier, Ref>>,
 }
 
 /// Used to signal the type of (decision) [`Variable`]
@@ -387,7 +427,7 @@ pub enum Type {
 
 /// The definition of a decision variable
 #[derive(Clone, PartialEq, Debug)]
-pub struct Variable<Identifier = String> {
+pub struct Variable<Identifier = String, Ref: FznRef = Immutable> {
 	/// The public name of the decision variable.
 	pub name: String,
 	/// The type of the decision variable, and set of potential values  from
@@ -398,7 +438,7 @@ pub struct Variable<Identifier = String> {
 	/// variable's `Type` are allowed in a solution.
 	pub ty: Type,
 	/// A list of annotations
-	pub ann: Vec<Annotation<Identifier>>,
+	pub ann: Vec<Annotation<Identifier, Ref>>,
 	/// This field is set to `true` when there is a constraint that has been
 	/// marked as defining this variable.
 	pub defined: bool,
@@ -408,7 +448,7 @@ pub struct Variable<Identifier = String> {
 	pub introduced: bool,
 }
 
-impl<Identifier: Display> Display for Annotation<Identifier> {
+impl<Identifier: Display, Ref: FznRef> Display for Annotation<Identifier, Ref> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			Annotation::Atom(a) => write!(f, "{a}"),
@@ -417,10 +457,10 @@ impl<Identifier: Display> Display for Annotation<Identifier> {
 	}
 }
 
-impl<Identifier> From<Argument<Identifier, Literal<Identifier>>>
-	for Argument<Identifier, AnnotationLiteral<Identifier>>
+impl<Identifier, Ref: FznRef> From<Argument<Identifier, Ref, Literal<Identifier, Ref>>>
+	for Argument<Identifier, Ref, AnnotationLiteral<Identifier, Ref>>
 {
-	fn from(value: Argument<Identifier>) -> Self {
+	fn from(value: Argument<Identifier, Ref>) -> Self {
 		match value {
 			Argument::Array(arr) => Argument::Array(arr.into_iter().map(|l| l.into()).collect()),
 			Argument::ArrayNamed(arr) => Argument::ArrayNamed(arr),
@@ -429,7 +469,42 @@ impl<Identifier> From<Argument<Identifier, Literal<Identifier>>>
 	}
 }
 
-impl<Identifier: Display> Display for AnnotationCall<Identifier> {
+impl<Identifier: Clone, Ref: FznRef, L: Clone> Clone for Argument<Identifier, Ref, L> {
+	fn clone(&self) -> Self {
+		match self {
+			Argument::Array(arr) => Argument::Array(arr.clone()),
+			Argument::ArrayNamed(arr) => Argument::ArrayNamed(arr.clone()),
+			Argument::Literal(lit) => Argument::Literal(lit.clone()),
+		}
+	}
+}
+
+impl<Identifier: Debug, Ref: FznRef, L: Debug> Debug for Argument<Identifier, Ref, L> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Argument::Array(arr) => f.debug_tuple("Array").field(arr).finish(),
+			Argument::ArrayNamed(arr) => {
+				Ref::with(arr, |arr| f.debug_tuple("ArrayNamed").field(arr).finish())
+			}
+			Argument::Literal(lit) => f.debug_tuple("Literal").field(lit).finish(),
+		}
+	}
+}
+
+impl<Identifier: PartialEq, Ref: FznRef, L: PartialEq> PartialEq for Argument<Identifier, Ref, L> {
+	fn eq(&self, other: &Self) -> bool {
+		match (self, other) {
+			(Argument::Array(a), Argument::Array(b)) => a == b,
+			(Argument::ArrayNamed(a), Argument::ArrayNamed(b)) => {
+				Ref::addr(a) == Ref::addr(b) || Ref::with(a, |a| Ref::with(b, |b| a == b))
+			}
+			(Argument::Literal(a), Argument::Literal(b)) => a == b,
+			_ => false,
+		}
+	}
+}
+
+impl<Identifier: Display, Ref: FznRef> Display for AnnotationCall<Identifier, Ref> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "{}(", self.id)?;
 		let mut first = true;
@@ -444,7 +519,7 @@ impl<Identifier: Display> Display for AnnotationCall<Identifier> {
 	}
 }
 
-impl<Idenfier: Display> Display for AnnotationLiteral<Idenfier> {
+impl<Identifier: Display, Ref: FznRef> Display for AnnotationLiteral<Identifier, Ref> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			AnnotationLiteral::Literal(lit) => write!(f, "{lit}"),
@@ -453,13 +528,15 @@ impl<Idenfier: Display> Display for AnnotationLiteral<Idenfier> {
 	}
 }
 
-impl<Identifier> From<Literal<Identifier>> for AnnotationLiteral<Identifier> {
-	fn from(value: Literal<Identifier>) -> Self {
+impl<Identifier, Ref: FznRef> From<Literal<Identifier, Ref>>
+	for AnnotationLiteral<Identifier, Ref>
+{
+	fn from(value: Literal<Identifier, Ref>) -> Self {
 		AnnotationLiteral::Literal(value)
 	}
 }
 
-impl<Identifier: Display, L: Display> Display for Argument<Identifier, L> {
+impl<Identifier: Display, Ref: FznRef, L: Display> Display for Argument<Identifier, Ref, L> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			Argument::Array(arr) => {
@@ -474,13 +551,13 @@ impl<Identifier: Display, L: Display> Display for Argument<Identifier, L> {
 				}
 				write!(f, "]")
 			}
-			Argument::ArrayNamed(arr) => write!(f, "{}", arr.name),
+			Argument::ArrayNamed(arr) => Ref::with(arr, |arr| write!(f, "{}", arr.name)),
 			Argument::Literal(lit) => write!(f, "{lit}"),
 		}
 	}
 }
 
-impl<Identifier> Array<Identifier> {
+impl<Identifier, Ref: FznRef> Array<Identifier, Ref> {
 	/// Clones this array reference into an [`ArcKey`].
 	///
 	/// This is useful when storing arrays in collections such as
@@ -509,7 +586,7 @@ impl<Identifier> Array<Identifier> {
 		let ty = match self.contents.first().unwrap() {
 			Literal::Int(_) => "int",
 			Literal::Float(_) => "float",
-			Literal::Variable(var) => return (var.ty.base_name(), true),
+			Literal::Variable(var) => return (Ref::with(var, |var| var.ty.base_name()), true),
 			Literal::Bool(_) => "bool",
 			Literal::IntSet(_) => "set of int",
 			Literal::FloatSet(_) => "set of float",
@@ -523,7 +600,7 @@ impl<Identifier> Array<Identifier> {
 	}
 }
 
-impl<Identifier: Display> Display for Constraint<Identifier> {
+impl<Identifier: Display, Ref: FznRef> Display for Constraint<Identifier, Ref> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "{}(", self.id)?;
 		let mut first = true;
@@ -545,7 +622,7 @@ impl<Identifier: Display> Display for Constraint<Identifier> {
 	}
 }
 
-impl<Identifier> FlatZinc<Identifier>
+impl<Identifier, Ref: FznRef> FlatZinc<Identifier, Ref>
 where
 	Identifier: Clone + Debug,
 {
@@ -597,7 +674,51 @@ where
 	}
 }
 
-impl<Identifier> Default for FlatZinc<Identifier> {
+impl<Identifier: Clone, Ref: FznRef> Clone for FlatZinc<Identifier, Ref> {
+	fn clone(&self) -> Self {
+		Self {
+			variables: self.variables.clone(),
+			arrays: self.arrays.clone(),
+			constraints: self.constraints.clone(),
+			output: self.output.clone(),
+			solve: self.solve.clone(),
+			version: self.version.clone(),
+		}
+	}
+}
+
+impl<Identifier: Debug, Ref: FznRef> Debug for FlatZinc<Identifier, Ref> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		/// Wrapper printing a slice of shared declarations as if the references
+		/// were transparent, matching the derived output under
+		/// [`Immutable`](helpers::Immutable).
+		struct Declarations<'a, T, Ref: FznRef>(&'a [Ref::Of<T>]);
+
+		impl<T: Debug, Ref: FznRef> Debug for Declarations<'_, T, Ref> {
+			fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+				let mut list = f.debug_list();
+				for node in self.0 {
+					let _ = Ref::with(node, |node| list.entry(node));
+				}
+				list.finish()
+			}
+		}
+
+		f.debug_struct("FlatZinc")
+			.field(
+				"variables",
+				&Declarations::<_, Ref>(self.variables.as_slice()),
+			)
+			.field("arrays", &Declarations::<_, Ref>(self.arrays.as_slice()))
+			.field("constraints", &self.constraints)
+			.field("output", &self.output)
+			.field("solve", &self.solve)
+			.field("version", &self.version)
+			.finish()
+	}
+}
+
+impl<Identifier, Ref: FznRef> Default for FlatZinc<Identifier, Ref> {
 	fn default() -> Self {
 		Self {
 			variables: Vec::new(),
@@ -610,60 +731,87 @@ impl<Identifier> Default for FlatZinc<Identifier> {
 	}
 }
 
-impl<Identifier: Display> Display for FlatZinc<Identifier> {
+impl<Identifier: PartialEq, Ref: FznRef> PartialEq for FlatZinc<Identifier, Ref> {
+	fn eq(&self, other: &Self) -> bool {
+		/// Compare two slices of shared declarations by content,
+		/// short-circuiting on pointer identity to avoid locking the same
+		/// declaration twice.
+		fn eq_declarations<T: PartialEq, Ref: FznRef>(a: &[Ref::Of<T>], b: &[Ref::Of<T>]) -> bool {
+			a.len() == b.len()
+				&& a.iter().zip(b).all(|(a, b)| {
+					Ref::addr(a) == Ref::addr(b) || Ref::with(a, |a| Ref::with(b, |b| a == b))
+				})
+		}
+
+		eq_declarations::<_, Ref>(&self.variables, &other.variables)
+			&& eq_declarations::<_, Ref>(&self.arrays, &other.arrays)
+			&& self.constraints == other.constraints
+			&& self.output == other.output
+			&& self.solve == other.solve
+			&& self.version == other.version
+	}
+}
+
+impl<Identifier: Display, Ref: FznRef> Display for FlatZinc<Identifier, Ref> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let output_map: HashSet<_> = self.output.iter().collect();
 
-		for var in &self.variables {
-			write!(f, "var {}", var.ty)?;
-			write!(f, ": {}", var.name)?;
-			let name_ref: NamedRef<_> = Arc::clone(var).into();
-			if output_map.contains(&name_ref) {
-				write!(f, " ::output_var")?;
-			}
-			if var.defined {
-				write!(f, " ::is_defined_var")?;
-			}
-			if var.introduced {
-				write!(f, " ::var_is_introduced")?;
-			}
-			for ann in &var.ann {
-				write!(f, " ::{ann}")?
-			}
-			writeln!(f, ";")?
-		}
-		for arr in &self.arrays {
-			let (ty, is_var) = arr.determine_type();
-			write!(
-				f,
-				"array[1..{}] of {}{ty}: {}",
-				arr.contents.len(),
-				if is_var { "var " } else { "" },
-				arr.name
-			)?;
-			let name_ref: NamedRef<_> = Arc::clone(arr).into();
-			if output_map.contains(&name_ref) {
-				write!(f, " ::output_array([1..{}])", arr.contents.len())?;
-			}
-			if arr.defined {
-				write!(f, " ::is_defined_var")?;
-			}
-			if arr.introduced {
-				write!(f, " ::var_is_introduced")?;
-			}
-			for ann in &arr.ann {
-				write!(f, " ::{ann}")?
-			}
-			write!(f, " = [")?;
-			let mut first = true;
-			for v in &arr.contents {
-				if !first {
-					write!(f, ", ")?;
+		for node in &self.variables {
+			let name_ref = NamedRef::Variable(node.clone());
+			let in_output = output_map.contains(&name_ref);
+			Ref::with(node, |var| {
+				write!(f, "var {}", var.ty)?;
+				write!(f, ": {}", var.name)?;
+				if in_output {
+					write!(f, " ::output_var")?;
 				}
-				write!(f, "{v}")?;
-				first = false;
-			}
-			writeln!(f, "];")?
+				if var.defined {
+					write!(f, " ::is_defined_var")?;
+				}
+				if var.introduced {
+					write!(f, " ::var_is_introduced")?;
+				}
+				for ann in &var.ann {
+					write!(f, " ::{ann}")?
+				}
+				writeln!(f, ";")
+			})?
+		}
+		for node in &self.arrays {
+			let name_ref = NamedRef::Array(node.clone());
+			let in_output = output_map.contains(&name_ref);
+			Ref::with(node, |arr| {
+				let (ty, is_var) = arr.determine_type();
+				write!(
+					f,
+					"array[1..{}] of {}{ty}: {}",
+					arr.contents.len(),
+					if is_var { "var " } else { "" },
+					arr.name
+				)?;
+				if in_output {
+					write!(f, " ::output_array([1..{}])", arr.contents.len())?;
+				}
+				if arr.defined {
+					write!(f, " ::is_defined_var")?;
+				}
+				if arr.introduced {
+					write!(f, " ::var_is_introduced")?;
+				}
+				for ann in &arr.ann {
+					write!(f, " ::{ann}")?
+				}
+				write!(f, " = [")?;
+				let mut first = true;
+				for v in &arr.contents {
+					if !first {
+						write!(f, ", ")?;
+					}
+					write!(f, "{v}")?;
+					first = false;
+				}
+				writeln!(f, "];")
+			})?
 		}
 		for c in &self.constraints {
 			writeln!(f, "constraint {c};")?;
@@ -672,12 +820,42 @@ impl<Identifier: Display> Display for FlatZinc<Identifier> {
 	}
 }
 
-impl<Identifier: Display> Display for Literal<Identifier> {
+impl<Identifier: Clone, Ref: FznRef> Clone for Literal<Identifier, Ref> {
+	fn clone(&self) -> Self {
+		match self {
+			Literal::Int(i) => Literal::Int(*i),
+			Literal::Float(x) => Literal::Float(*x),
+			Literal::Variable(var) => Literal::Variable(var.clone()),
+			Literal::Bool(b) => Literal::Bool(*b),
+			Literal::IntSet(is) => Literal::IntSet(is.clone()),
+			Literal::FloatSet(fs) => Literal::FloatSet(fs.clone()),
+			Literal::String(s) => Literal::String(s.clone()),
+		}
+	}
+}
+
+impl<Identifier: Debug, Ref: FznRef> Debug for Literal<Identifier, Ref> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Literal::Int(i) => f.debug_tuple("Int").field(i).finish(),
+			Literal::Float(x) => f.debug_tuple("Float").field(x).finish(),
+			Literal::Variable(var) => {
+				Ref::with(var, |var| f.debug_tuple("Variable").field(var).finish())
+			}
+			Literal::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
+			Literal::IntSet(is) => f.debug_tuple("IntSet").field(is).finish(),
+			Literal::FloatSet(fs) => f.debug_tuple("FloatSet").field(fs).finish(),
+			Literal::String(s) => f.debug_tuple("String").field(s).finish(),
+		}
+	}
+}
+
+impl<Identifier: Display, Ref: FznRef> Display for Literal<Identifier, Ref> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			Literal::Int(i) => write!(f, "{i}"),
 			Literal::Float(x) => write!(f, "{x:?}"),
-			Literal::Variable(var) => write!(f, "{}", var.name),
+			Literal::Variable(var) => Ref::with(var, |var| write!(f, "{}", var.name)),
 			Literal::Bool(b) => write!(f, "{b}"),
 			Literal::IntSet(is) => write!(f, "{is}"),
 			Literal::FloatSet(fs) => write!(f, "{fs}"),
@@ -686,7 +864,24 @@ impl<Identifier: Display> Display for Literal<Identifier> {
 	}
 }
 
-impl<Identifier: Display> Display for Method<Identifier> {
+impl<Identifier: PartialEq, Ref: FznRef> PartialEq for Literal<Identifier, Ref> {
+	fn eq(&self, other: &Self) -> bool {
+		match (self, other) {
+			(Literal::Int(a), Literal::Int(b)) => a == b,
+			(Literal::Float(a), Literal::Float(b)) => a == b,
+			(Literal::Variable(a), Literal::Variable(b)) => {
+				Ref::addr(a) == Ref::addr(b) || Ref::with(a, |a| Ref::with(b, |b| a == b))
+			}
+			(Literal::Bool(a), Literal::Bool(b)) => a == b,
+			(Literal::IntSet(a), Literal::IntSet(b)) => a == b,
+			(Literal::FloatSet(a), Literal::FloatSet(b)) => a == b,
+			(Literal::String(a), Literal::String(b)) => a == b,
+			_ => false,
+		}
+	}
+}
+
+impl<Identifier: Display, Ref: FznRef> Display for Method<Identifier, Ref> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			Method::Satisfy => write!(f, "satisfy"),
@@ -696,55 +891,100 @@ impl<Identifier: Display> Display for Method<Identifier> {
 	}
 }
 
-impl<Identifier> NamedRef<Identifier> {
+impl<Identifier, Ref: FznRef> NamedRef<Identifier, Ref> {
 	/// Return the identifier of the referenced output target.
-	pub fn name(&self) -> &str {
+	///
+	/// The name is borrowed under [`Immutable`], but must be
+	/// cloned under [`Mutable`], where it lives behind a lock.
+	pub fn name(&self) -> Cow<'_, str> {
 		match self {
-			NamedRef::Variable(var) => &var.name,
-			NamedRef::Array(array) => &array.name,
+			NamedRef::Variable(var) => Ref::map_str(var, |var| &var.name),
+			NamedRef::Array(array) => Ref::map_str(array, |array| &array.name),
 		}
 	}
 }
 
-impl<Identifier> Eq for NamedRef<Identifier> {}
-
-impl<Identifier> From<Arc<Array<Identifier>>> for NamedRef<Identifier> {
-	fn from(arc: Arc<Array<Identifier>>) -> Self {
-		NamedRef::Array(arc)
+impl<Identifier, Ref: FznRef> Clone for NamedRef<Identifier, Ref> {
+	fn clone(&self) -> Self {
+		match self {
+			NamedRef::Variable(var) => NamedRef::Variable(var.clone()),
+			NamedRef::Array(array) => NamedRef::Array(array.clone()),
+		}
 	}
 }
 
-impl<Identifier> From<Arc<Variable<Identifier>>> for NamedRef<Identifier> {
-	fn from(arc: Arc<Variable<Identifier>>) -> Self {
-		NamedRef::Variable(arc)
+impl<Identifier: Debug, Ref: FznRef> Debug for NamedRef<Identifier, Ref> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			NamedRef::Variable(var) => {
+				Ref::with(var, |var| f.debug_tuple("Variable").field(var).finish())
+			}
+			NamedRef::Array(array) => {
+				Ref::with(array, |array| f.debug_tuple("Array").field(array).finish())
+			}
+		}
 	}
 }
 
-impl<Identifier> Hash for NamedRef<Identifier> {
+impl<Identifier, Ref: FznRef> Eq for NamedRef<Identifier, Ref> {}
+
+// These conversions cannot be written generically over `Ref`: an associated
+// type is opaque, so the compiler cannot rule out that `Ref::Of<Array<..>>` and
+// `Ref::Of<Variable<..>>` name the same type for some implementor, and the two
+// impls would overlap. They are therefore spelled out per marker. Generic code
+// constructs the variants directly instead.
+
+impl<Identifier> From<Arc<Array<Identifier, Immutable>>> for NamedRef<Identifier, Immutable> {
+	fn from(node: Arc<Array<Identifier, Immutable>>) -> Self {
+		NamedRef::Array(node)
+	}
+}
+
+impl<Identifier> From<Arc<Variable<Identifier, Immutable>>> for NamedRef<Identifier, Immutable> {
+	fn from(node: Arc<Variable<Identifier, Immutable>>) -> Self {
+		NamedRef::Variable(node)
+	}
+}
+
+impl<Identifier> From<Arc<RwLock<Array<Identifier, Mutable>>>> for NamedRef<Identifier, Mutable> {
+	fn from(node: Arc<RwLock<Array<Identifier, Mutable>>>) -> Self {
+		NamedRef::Array(node)
+	}
+}
+
+impl<Identifier> From<Arc<RwLock<Variable<Identifier, Mutable>>>>
+	for NamedRef<Identifier, Mutable>
+{
+	fn from(node: Arc<RwLock<Variable<Identifier, Mutable>>>) -> Self {
+		NamedRef::Variable(node)
+	}
+}
+
+impl<Identifier, Ref: FznRef> Hash for NamedRef<Identifier, Ref> {
 	fn hash<H: Hasher>(&self, state: &mut H) {
 		self.name().hash(state);
 	}
 }
 
-impl<Identifier> Ord for NamedRef<Identifier> {
+impl<Identifier, Ref: FznRef> Ord for NamedRef<Identifier, Ref> {
 	fn cmp(&self, other: &Self) -> Ordering {
-		self.name().cmp(other.name())
+		self.name().cmp(&other.name())
 	}
 }
 
-impl<Identifier> PartialEq for NamedRef<Identifier> {
+impl<Identifier, Ref: FznRef> PartialEq for NamedRef<Identifier, Ref> {
 	fn eq(&self, other: &Self) -> bool {
 		self.name() == other.name()
 	}
 }
 
-impl<Identifier> PartialOrd for NamedRef<Identifier> {
+impl<Identifier, Ref: FznRef> PartialOrd for NamedRef<Identifier, Ref> {
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
 		Some(self.cmp(other))
 	}
 }
 
-impl<Identifier> Default for SolveObjective<Identifier> {
+impl<Identifier, Ref: FznRef> Default for SolveObjective<Identifier, Ref> {
 	fn default() -> Self {
 		Self {
 			method: Default::default(),
@@ -753,7 +993,7 @@ impl<Identifier> Default for SolveObjective<Identifier> {
 	}
 }
 
-impl<Identifier: Display> Display for SolveObjective<Identifier> {
+impl<Identifier: Display, Ref: FznRef> Display for SolveObjective<Identifier, Ref> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "solve ")?;
 		for a in &self.ann {
@@ -789,7 +1029,7 @@ impl Display for Type {
 	}
 }
 
-impl<Identifier> Variable<Identifier> {
+impl<Identifier, Ref: FznRef> Variable<Identifier, Ref> {
 	/// Clones this variable reference into an [`ArcKey`].
 	///
 	/// This is useful when storing variables in collections such as
