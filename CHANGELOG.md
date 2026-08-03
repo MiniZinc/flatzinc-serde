@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## unreleased
 
+## [0.6.0](https://github.com/MiniZinc/flatzinc-serde/compare/v0.5.1...v0.6.0) - 2026-08-03
+
+### Added
+
+- [**breaking**] add opt-in interior mutability via a `Ref` type parameter
+- use `Arc` for `AnnotationLiteral`
+
+### Other
+
+- update dependencies
+
 ## [0.5.1](https://github.com/MiniZinc/flatzinc-serde/compare/v0.5.0...v0.5.1) - 2026-06-08
 
 ### Other
