@@ -23,7 +23,7 @@ fzn = ["dep:winnow"]
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"], optional = true }
-rangelist = { version = "0.5.0" }
+rangelist = { version = "0.6.0" }
 winnow = { version = "1.0.3", optional = true }
 
 [dev-dependencies]

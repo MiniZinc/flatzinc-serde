@@ -142,9 +142,9 @@ dependencies = [
 
 [[package]]
 name = "rangelist"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f29e404ad93c4ca7067453de0924a82e1144adfdb4afd24fa15aeac91ca8e4c3"
+checksum = "5b9f3dfe3a6b4e61b204dd5997fc24c0ac93430b55899e42cd532a0dedc047e4"
 
 [[package]]
 name = "redox_syscall"
