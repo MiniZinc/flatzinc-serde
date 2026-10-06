@@ -170,10 +170,10 @@ pub(super) fn literal<'a, Identifier, F>(input: &mut Stream<'a, Identifier, F>) 
 		Identifier(&'a str),
 	}
 
-	// This can be optimized if it turns out to be a bottleneck. At the moment, to
-	// parse a literal, it will first attempt to parse a float and, if that fails,
-	// parse an integer. We can be more clever about that by peeking at the next
-	// character to determine what is being parsed.
+	// This can be optimized if it turns out to be a bottleneck. At the moment,
+	// to parse a literal, it will first attempt to parse a float and, if
+	// that fails, parse an integer. We can be more clever about that by
+	// peeking at the next character to determine what is being parsed.
 	let parsed_literal = alt((
 		set(int).map(Literal::IntSet).map(ParsedLiteral::Literal),
 		set(float)

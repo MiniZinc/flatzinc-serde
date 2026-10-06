@@ -584,8 +584,9 @@ where
 		if self.in_progress[name.index()] {
 			// Back-edge to a name whose annotations are still being linked: the
 			// enclosing annotation is self/cyclic and gets dropped by
-			// `link_annotations`. Reported as an unknown reference so it unwinds
-			// through the normal machinery without extracting the entry.
+			// `link_annotations`. Reported as an unknown reference so it
+			// unwinds through the normal machinery without
+			// extracting the entry.
 			self.self_ref = true;
 			return Err(LinkError::UnknownReference(self.names.to_owned(name)));
 		}
